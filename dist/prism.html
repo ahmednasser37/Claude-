@@ -1,0 +1,2742 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8">
+<title>PRISM — Field Ledger</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* Field Ledger — ink-and-paper tones inverted for screen, one brass fitting. */
+:root {
+  --bg: #12141a;
+  --sidebar: #0e1015;
+  --raised: #191c23;
+  --raised-2: #1f232b;
+  --border: #2a2f39;
+  --border-soft: #21252d;
+  --text: #ece9e2;
+  --dim: #9ca0ab;
+  --dim-2: #5b606c;
+  --accent: #c9a24b;   /* scarce: active-nav mark, one chart line, one primary button */
+  --trace: #6c93b0;    /* secondary data series only */
+  --good: #6fbf8b;
+  --warn: #e0a458;
+  --bad: #e0645a;
+  /* validated categorical trio for the resource histogram (dark surface) */
+  --cat-labor: #3f83c9;
+  --cat-equip: #bd7f33;
+  --cat-mat: #9068d8;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; padding: 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ---------- shell ---------- */
+.shell { display: flex; min-height: 100vh; }
+.sidebar {
+  width: 240px; flex: 0 0 240px;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border-soft);
+  padding: 16px 12px 24px;
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+}
+.brand { display: flex; align-items: baseline; gap: 8px; padding: 4px 10px 18px; }
+.brand b { font-size: 15px; letter-spacing: .14em; }
+.brand span { font-size: 11px; color: var(--dim-2); letter-spacing: .06em; }
+.brand i { display: inline-block; width: 9px; height: 9px; border: 1.5px solid var(--accent); border-radius: 50%; transform: translateY(.5px); }
+
+.navgroup { margin: 14px 0 4px; }
+.navgroup > h3 {
+  margin: 0 0 4px; padding: 0 10px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--dim-2);
+}
+.navlist { position: relative; }
+.nav-indicator {
+  position: absolute; left: 0; width: 3px; border-radius: 2px;
+  background: var(--accent);
+  transition: top .22s cubic-bezier(.4,0,.2,1), height .22s cubic-bezier(.4,0,.2,1), opacity .2s;
+  opacity: 0;
+}
+.navitem {
+  display: flex; width: 100%; align-items: center; gap: 9px;
+  padding: 7px 10px 7px 14px; border-radius: 7px;
+  color: var(--dim); text-align: left; font-size: 13.5px;
+  transition: background .15s, color .15s;
+}
+.navitem:hover { background: var(--raised); color: var(--text); }
+.navitem.active { color: var(--text); background: var(--raised); }
+.navitem .k { margin-left: auto; font-size: 11px; color: var(--dim-2); }
+.navitem.active .k { color: var(--accent); }
+
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.header {
+  height: 56px; flex: 0 0 56px;
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--border-soft);
+  position: sticky; top: 0; background: var(--bg); z-index: 30;
+}
+.header .crumb { font-size: 12px; color: var(--dim-2); }
+.header .crumb b { color: var(--text); font-size: 14.5px; font-weight: 600; display: block; line-height: 1.15; }
+.chip {
+  font-size: 11.5px; padding: 3px 10px; border: 1px solid var(--border);
+  border-radius: 999px; color: var(--dim); background: var(--raised);
+  white-space: nowrap;
+}
+.chip .num { color: var(--text); }
+.spacer { flex: 1; }
+.btn {
+  padding: 7px 14px; border-radius: 7px; font-size: 13px; font-weight: 550;
+  border: 1px solid var(--border); background: var(--raised); color: var(--text);
+  transition: border-color .15s, background .15s;
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--dim-2); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #16130a; font-weight: 650; }
+.btn.primary:hover { filter: brightness(1.07); }
+.btn.small { padding: 4px 10px; font-size: 12px; }
+.hamburger { display: none; }
+
+.view { padding: 22px; max-width: 1180px; width: 100%; margin: 0 auto; animation: settle .24s ease-out; }
+@keyframes settle { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+
+/* ---------- density primitives: rows on the page, hairline dividers ---------- */
+.section { margin: 0 0 26px; }
+.section > h2 {
+  margin: 0 0 2px; font-size: 15px; font-weight: 650; letter-spacing: .01em;
+}
+.section > .sub { margin: 0 0 12px; font-size: 12.5px; color: var(--dim); }
+
+.statrow {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft);
+}
+.stat {
+  padding: 14px 16px 12px; text-align: left; border-right: 1px solid var(--border-soft);
+  transition: background .15s;
+}
+.stat:last-child { border-right: none; }
+.stat:hover { background: var(--raised); }
+.stat .label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim-2); }
+.stat .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 24px; line-height: 1.3; }
+.stat .note { font-size: 11.5px; color: var(--dim); }
+.stat .value.good { color: var(--good); } .stat .value.warn { color: var(--warn); } .stat .value.bad { color: var(--bad); }
+
+table.ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.ledger th {
+  text-align: left; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--dim-2); font-weight: 600; padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+table.ledger td { padding: 8px 10px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+table.ledger td.num, table.ledger th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+table.ledger tr.rowlink { cursor: pointer; transition: background .12s; }
+table.ledger tr.rowlink:hover { background: var(--raised); }
+.tablewrap { overflow-x: auto; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 650; letter-spacing: .05em;
+  padding: 2px 9px; border-radius: 999px; text-transform: uppercase;
+}
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.pass { color: var(--good); background: rgba(111,191,139,.12); }
+.pill.fail { color: var(--bad); background: rgba(224,100,90,.12); }
+.pill.warn { color: var(--warn); background: rgba(224,164,88,.12); }
+.pill.na   { color: var(--dim); background: rgba(155,160,171,.10); }
+.pill.info { color: var(--trace); background: rgba(108,147,176,.12); }
+
+.na-tag { font-size: 12px; color: var(--dim); border-bottom: 1px dotted var(--dim-2); cursor: help; }
+
+.bar { height: 4px; border-radius: 2px; background: var(--raised-2); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--trace); border-radius: 2px; }
+.bar > i.brass { background: var(--accent); }
+
+/* ---------- cards: reserved for genuinely discrete units ---------- */
+.card {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--raised);
+  padding: 14px 16px;
+}
+.cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.taskcard { cursor: pointer; transition: border-color .15s; text-align: left; width: 100%; }
+.taskcard:hover { border-color: var(--dim-2); }
+.taskcard h4 { margin: 0; font-size: 13.5px; font-weight: 650; }
+.taskcard .meta { font-size: 11.5px; color: var(--dim); margin-top: 2px; }
+.badge-crit {
+  font-size: 10px; font-weight: 700; letter-spacing: .08em; color: var(--bad);
+  border: 1px dashed var(--bad); border-radius: 4px; padding: 1px 6px; text-transform: uppercase;
+}
+
+/* ---------- modal ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(6,7,10,.62); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center; padding: 18px;
+  animation: fadein .16s ease-out;
+}
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+.modal-card {
+  background: var(--raised-2); border: 1px solid var(--border); border-radius: 12px;
+  width: min(620px, 100%); max-height: min(78vh, 720px);
+  display: flex; flex-direction: column;
+  animation: settle .2s ease-out;
+}
+.modal-head { padding: 16px 20px 12px; border-bottom: 1px solid var(--border-soft); display: flex; gap: 12px; }
+.modal-head h3 { margin: 0; font-size: 15.5px; }
+.modal-head .sub { font-size: 12px; color: var(--dim); margin-top: 1px; }
+.modal-close { margin-left: auto; color: var(--dim-2); font-size: 20px; line-height: 1; align-self: flex-start; }
+.modal-close:hover { color: var(--text); }
+.modal-body { padding: 14px 20px; overflow-y: auto; font-size: 13.5px; }
+.modal-body dl { display: grid; grid-template-columns: minmax(110px, auto) 1fr; gap: 4px 16px; margin: 0 0 10px; }
+.modal-body dt { color: var(--dim-2); font-size: 12px; padding-top: 2px; }
+.modal-body dd { margin: 0; }
+.modal-foot { padding: 12px 20px; border-top: 1px solid var(--border-soft); display: flex; gap: 10px; justify-content: flex-end; }
+
+/* ---------- charts ---------- */
+.chartbox { position: relative; }
+.chartbox canvas { width: 100%; display: block; }
+.chart-tip {
+  position: absolute; pointer-events: none; z-index: 20;
+  background: var(--raised-2); border: 1px solid var(--border); border-radius: 7px;
+  padding: 7px 10px; font-size: 12px; white-space: nowrap; display: none;
+}
+.chart-tip b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--dim); margin: 8px 2px 0; }
+.legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; transform: translateY(-2.5px); }
+.legend i.dot { width: 8px; height: 8px; border-radius: 50%; transform: translateY(-1px); }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.ringrow { display: flex; gap: 26px; flex-wrap: wrap; margin-bottom: 8px; }
+.ring { display: flex; align-items: center; gap: 10px; }
+.ring svg { transform: rotate(-90deg); }
+.ring .rv { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 17px; line-height: 1.2; }
+.ring .rl { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim-2); }
+
+/* ---------- tabs ---------- */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.tab { padding: 8px 14px; font-size: 13px; color: var(--dim); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* ---------- WBS tree ---------- */
+.wbsrow {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  padding: 8px 10px; border-bottom: 1px solid var(--border-soft);
+  transition: background .12s;
+}
+.wbsrow:hover { background: var(--raised); }
+.wbsrow .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wbsrow .name small { color: var(--dim-2); margin-right: 8px; font-family: var(--mono); }
+.wbsrow .cnt { font-size: 11.5px; color: var(--dim-2); white-space: nowrap; }
+.wbsrow .pctbar { width: 130px; flex: 0 0 130px; }
+.wbsrow .pct { width: 58px; text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+
+.banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 12.5px; color: var(--dim);
+  border: 1px dashed var(--border); border-radius: 9px;
+  padding: 9px 14px; margin-bottom: 20px;
+}
+.banner b { color: var(--text); font-weight: 600; }
+
+.empty {
+  border: 1px dashed var(--border); border-radius: 10px; padding: 34px 20px;
+  text-align: center; color: var(--dim);
+}
+.empty h3 { margin: 0 0 6px; color: var(--text); font-size: 15px; }
+
+.offender-list { margin: 8px 0 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 12px; color: var(--dim); column-width: 130px; }
+.offender-list li { padding: 1px 0; }
+
+kbd.formula {
+  display: block; font-family: var(--mono); font-size: 12px; color: var(--dim);
+  background: var(--raised); border: 1px solid var(--border-soft); border-radius: 6px;
+  padding: 8px 10px; margin: 6px 0 10px; white-space: normal;
+}
+
+/* ---------- mobile: drawer, not display:none ---------- */
+.scrim { display: none; }
+@media (max-width: 860px) {
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; z-index: 60; height: 100vh;
+    transform: translateX(-100%); transition: transform .22s ease-out;
+    box-shadow: 12px 0 40px rgba(0,0,0,.45);
+  }
+  .shell.drawer-open .sidebar { transform: none; }
+  .shell.drawer-open .scrim {
+    display: block; position: fixed; inset: 0; z-index: 50;
+    background: rgba(6,7,10,.55); border: none;
+  }
+  .hamburger {
+    display: flex; flex-direction: column; justify-content: center; gap: 4px;
+    width: 34px; height: 34px; padding: 7px; border-radius: 7px;
+  }
+  .hamburger:hover { background: var(--raised); }
+  .hamburger i { display: block; height: 2px; background: var(--text); border-radius: 1px; }
+  .header { padding: 0 14px; gap: 10px; }
+  .header .chip { display: none; }
+  .view { padding: 16px 14px; }
+  .wbsrow .pctbar { width: 70px; flex-basis: 70px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
+</style>
+</head>
+<body><div id="prism-root"></div>
+<script>
+(function(){
+// ---- src/kernel/xer-parser.js ----
+// xer-parser.js — pure text -> tables. No DOM, no imports.
+//
+// XER grammar (verified against P6 exports):
+//   ERMHDR\t<version>\t<date>\t...          one informational header line
+//   %T\t<TableName>                          starts a table block
+//   %F\t<f1>\t<f2>\t...                      field names for the rows that follow
+//   %R\t<v1>\t<v2>\t...                      one row
+//   %E                                       end of file marker (optional)
+//
+// A logical table may be split across multiple %T blocks with the same name:
+// rows are APPENDED to the existing array, never overwritten.
+
+function parseXER(text) {
+  const tables = {};
+  let header = null;
+  let cur = null;
+  let fields = null;
+  const lines = text.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line) continue;
+    const cells = line.split('\t');
+    switch (cells[0]) {
+      case 'ERMHDR':
+        header = { version: cells[1], exportDate: cells[2], raw: cells.slice(1) };
+        break;
+      case '%T': {
+        const name = cells[1];
+        if (!tables[name]) tables[name] = [];
+        cur = tables[name];       // append on repeat blocks, never reassign
+        fields = null;
+        break;
+      }
+      case '%F':
+        fields = cells.slice(1);
+        break;
+      case '%R': {
+        if (!cur || !fields) break;
+        const row = {};
+        for (let i = 0; i < fields.length; i++) {
+          const v = cells[i + 1];
+          // trailing empty cells are common: short row => undefined, not ''
+          row[fields[i]] = v === undefined || v === '' ? undefined : v;
+        }
+        cur.push(row);
+        break;
+      }
+      case '%E':
+        cur = null;
+        fields = null;
+        break;
+    }
+  }
+  return { tables, header };
+}
+
+// Numeric coercion contract: NaN / empty / absent => undefined, never 0.
+// Zero is a valid value; "field absent" is a different thing.
+function num(v) {
+  if (v === undefined || v === null || v === '') return undefined;
+  const n = parseFloat(v);
+  return Number.isNaN(n) ? undefined : n;
+}
+
+
+// ---- src/kernel/calendar.js ----
+// calendar.js — P6 clndr_data parsing + working-day math. Pure, no DOM.
+//
+// All date math is UTC-based. P6 date strings ('YYYY-MM-DD HH:MM') are parsed
+// with Date.UTC and read back with getUTC* only — never bare new Date(str),
+// which the JS spec parses as UTC midnight and local getters then shift by a
+// day anywhere west of UTC.
+
+const DAY_MS = 86400000;
+// Lotus/Excel serial epoch, confirmed by decoding real P6 exception serials.
+const SERIAL_EPOCH_MS = Date.UTC(1899, 11, 30);
+
+function parseP6Date(s) {
+  if (s === undefined || s === null || s === '') return undefined;
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/.exec(s);
+  if (!m) return undefined;
+  return Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0));
+}
+
+function serialToUTC(serial) {
+  return SERIAL_EPOCH_MS + serial * DAY_MS;
+}
+
+function dayFloor(ms) {
+  return Math.floor(ms / DAY_MS) * DAY_MS;
+}
+
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function fmtDate(ms) {
+  if (ms === undefined || ms === null) return 'N/A';
+  const d = new Date(ms);
+  return `${String(d.getUTCDate()).padStart(2, '0')} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+// ---- clndr_data recursive-descent parser -----------------------------------
+// Grammar (fixed): node = '(' index '||' NAME '(' args ')' '(' children* ')' ')'
+// args never contain parentheses; children are nodes.
+
+function parseClndrTree(s, i = 0) {
+  while (i < s.length && s[i] !== '(') i++;
+  if (i >= s.length) return null;
+  i++; // consume '('
+  let j = s.indexOf('||', i);
+  if (j === -1) return null;
+  i = j + 2;
+  j = s.indexOf('(', i);
+  const name = s.slice(i, j).trim();
+  i = j + 1;
+  j = s.indexOf(')', i); // args contain no parens in this grammar
+  const args = s.slice(i, j);
+  i = j + 1;
+  while (i < s.length && /\s/.test(s[i])) i++;
+  const children = [];
+  if (s[i] === '(') {
+    i++;
+    for (;;) {
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (i >= s.length) break;
+      if (s[i] === ')') { i++; break; }
+      const r = parseClndrTree(s, i);
+      if (!r) break;
+      children.push(r.node);
+      i = r.pos;
+    }
+  }
+  while (i < s.length && /\s/.test(s[i])) i++;
+  if (s[i] === ')') i++;
+  return { node: { name, args, children }, pos: i };
+}
+
+function shiftHours(args) {
+  // args like 's|08:00|f|16:00' — possibly multiple s/f pairs
+  const parts = args.split('|');
+  const shifts = [];
+  for (let k = 0; k < parts.length - 3; k++) {
+    if (parts[k] === 's' && parts[k + 2] === 'f') {
+      shifts.push({ s: parts[k + 1], f: parts[k + 3] });
+      k += 3;
+    }
+  }
+  return shifts;
+}
+
+function hhmmToHours(t) {
+  const [h, m] = t.split(':').map(Number);
+  return h + m / 60;
+}
+
+function shiftsToHours(shifts) {
+  let hrs = 0;
+  for (const sh of shifts) {
+    const d = hhmmToHours(sh.f) - hhmmToHours(sh.s);
+    if (d > 0) hrs += d;
+  }
+  return hrs;
+}
+
+// parseClndrData(str) -> { week: {1..7: shifts[]}, exceptions: Map(dayMs -> shifts[]) }
+// P6 weekday numbering: 1 = Sunday ... 7 = Saturday (jsDate.getUTCDay() + 1).
+function parseClndrData(str) {
+  const week = { 1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [] };
+  const exceptions = new Map();
+  if (!str) return { week, exceptions };
+  const root = parseClndrTree(str);
+  if (!root) return { week, exceptions };
+  const walk = (node) => {
+    if (node.name === 'DaysOfWeek') {
+      for (const day of node.children) {
+        const n = parseInt(day.name, 10);
+        if (n >= 1 && n <= 7) {
+          const shifts = [];
+          for (const sh of day.children) shifts.push(...shiftHours(sh.args));
+          week[n] = shifts;
+        }
+      }
+      return;
+    }
+    if (node.name === 'Exceptions') {
+      for (const ex of node.children) {
+        const m = /d\|(\d+)/.exec(ex.args);
+        if (!m) continue;
+        const dayMs = serialToUTC(parseInt(m[1], 10));
+        const shifts = [];
+        for (const sh of ex.children) shifts.push(...shiftHours(sh.args));
+        exceptions.set(dayMs, shifts); // empty shifts = full holiday
+      }
+      return;
+    }
+    for (const c of node.children) walk(c);
+  };
+  walk(root.node);
+  return { week, exceptions };
+}
+
+// ---- Calendar object --------------------------------------------------------
+
+function makeCalendar(row) {
+  const data = parseClndrData(row.clndr_data);
+  const dayHrs = row.day_hr_cnt !== undefined ? parseFloat(row.day_hr_cnt) : 8;
+  return {
+    id: row.clndr_id,
+    name: row.clndr_name || `Calendar ${row.clndr_id}`,
+    dayHrs: Number.isNaN(dayHrs) ? 8 : dayHrs,
+    week: data.week,
+    exceptions: data.exceptions,
+    _hoursCache: new Map(),
+  };
+}
+
+// Documented fallback when a clndr_id doesn't resolve: Mon–Fri, 8h days.
+function defaultCalendar() {
+  const week = { 1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [] };
+  for (const d of [2, 3, 4, 5, 6]) week[d] = [{ s: '08:00', f: '16:00' }]; // Mon..Fri
+  return {
+    id: '__default', name: 'Default (Mon–Fri 8h — fallback)', dayHrs: 8,
+    week, exceptions: new Map(), _hoursCache: new Map(),
+  };
+}
+
+function hoursOnDay(cal, dayMs) {
+  dayMs = dayFloor(dayMs);
+  const cached = cal._hoursCache.get(dayMs);
+  if (cached !== undefined) return cached;
+  let hrs;
+  if (cal.exceptions.has(dayMs)) {
+    hrs = shiftsToHours(cal.exceptions.get(dayMs));
+  } else {
+    const p6Day = new Date(dayMs).getUTCDay() + 1; // 1=Sun..7=Sat
+    hrs = shiftsToHours(cal.week[p6Day] || []);
+  }
+  cal._hoursCache.set(dayMs, hrs);
+  return hrs;
+}
+
+function isWorkingDay(cal, dayMs) {
+  return hoursOnDay(cal, dayMs) > 0;
+}
+
+// Count working days in the half-open range [startMs, endMs).
+function workingDaysBetween(cal, startMs, endMs) {
+  if (startMs === undefined || endMs === undefined) return undefined;
+  let a = dayFloor(startMs), b = dayFloor(endMs), sign = 1;
+  if (a > b) { [a, b] = [b, a]; sign = -1; }
+  let n = 0;
+  for (let d = a; d < b; d += DAY_MS) if (isWorkingDay(cal, d)) n++;
+  return n * sign;
+}
+
+// Inclusive working-day duration of a date span (start and end both counted).
+function workingDaySpan(cal, startMs, endMs) {
+  const n = workingDaysBetween(cal, startMs, endMs + DAY_MS);
+  return n === undefined ? undefined : Math.max(n, 0);
+}
+
+// Date reached after advancing n working days from startMs (n=0 -> first
+// working day at or after start; n=1 -> the next working day after that).
+function addWorkingDays(cal, startMs, n) {
+  let d = dayFloor(startMs);
+  let guard = 0;
+  while (!isWorkingDay(cal, d)) { d += DAY_MS; if (++guard > 3660) return d; }
+  let left = n;
+  guard = 0;
+  while (left > 0) {
+    d += DAY_MS;
+    if (isWorkingDay(cal, d)) left--;
+    if (++guard > 36600) break;
+  }
+  return d;
+}
+
+// ---- Period bucketing --------------------------------------------------------
+
+function periodKey(ms, gran) {
+  const d = new Date(dayFloor(ms));
+  if (gran === 'week') {
+    // Week anchored on Sunday (matches the Sun–Thu site calendars this tool
+    // most often sees; purely a display bucket, not schedule logic).
+    const start = dayFloor(ms) - d.getUTCDay() * DAY_MS;
+    const s = new Date(start);
+    return `${s.getUTCFullYear()}-${String(s.getUTCMonth() + 1).padStart(2, '0')}-${String(s.getUTCDate()).padStart(2, '0')}`;
+  }
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function periodStart(key, gran) {
+  if (gran === 'week') {
+    const [y, m, dd] = key.split('-').map(Number);
+    return Date.UTC(y, m - 1, dd);
+  }
+  const [y, m] = key.split('-').map(Number);
+  return Date.UTC(y, m - 1, 1);
+}
+
+// Spread `amount` across [startMs, endMs] (inclusive) proportionally to each
+// working day's hours, bucketed by period. If the span has no working days,
+// the whole amount lands in the start's period (a real zero-duration event).
+function spreadAcrossPeriods(cal, startMs, endMs, amount, gran, into = new Map()) {
+  if (startMs === undefined || endMs === undefined || amount === undefined) return into;
+  const a = dayFloor(Math.min(startMs, endMs));
+  const b = dayFloor(Math.max(startMs, endMs));
+  let totalHrs = 0;
+  for (let d = a; d <= b; d += DAY_MS) totalHrs += hoursOnDay(cal, d);
+  if (totalHrs === 0) {
+    const k = periodKey(a, gran);
+    into.set(k, (into.get(k) || 0) + amount);
+    return into;
+  }
+  for (let d = a; d <= b; d += DAY_MS) {
+    const h = hoursOnDay(cal, d);
+    if (h === 0) continue;
+    const k = periodKey(d, gran);
+    into.set(k, (into.get(k) || 0) + amount * (h / totalHrs));
+  }
+  return into;
+}
+
+
+// ---- src/kernel/chainage.js ----
+// chainage.js — KP-pattern extraction + out-of-sequence detection. Pure.
+
+// Extract a KP/chainage value (in km) from an activity code or name.
+// Matches e.g. 'KP515+000' (515.0 km), 'KP 512', 'KP0524+500' (524.5 km).
+// No match => null, never a fabricated 0.
+function extractChainage(str) {
+  if (!str) return null;
+  const m = /KP\s?0*(\d{2,4})(?:\+(\d{3}))?/i.exec(str);
+  if (!m) return null;
+  return parseInt(m[1], 10) + (m[2] ? parseInt(m[2], 10) / 1000 : 0);
+}
+
+function taskChainage(task) {
+  const fromCode = extractChainage(task.code);
+  if (fromCode !== null) return fromCode;
+  return extractChainage(task.name);
+}
+
+// For every predecessor->successor relationship where both sides carry a
+// chainage, flag pairs where the successor sits BEHIND the predecessor
+// (assumes the works advance in increasing-KP direction — stated, reviewable
+// assumption; this is a repair queue, never an auto-fix).
+function findOutOfSequence(model) {
+  const out = [];
+  for (const p of model.preds) {
+    const pred = model.taskById.get(p.predTaskId);
+    const succ = model.taskById.get(p.taskId);
+    if (!pred || !succ) continue;
+    if (pred.chainage === null || succ.chainage === null) continue;
+    if (succ.chainage < pred.chainage) {
+      out.push({
+        pred, succ, rel: p,
+        predKp: pred.chainage, succKp: succ.chainage,
+        deltaKm: +(pred.chainage - succ.chainage).toFixed(3),
+      });
+    }
+  }
+  out.sort((a, b) => b.deltaKm - a.deltaKm);
+  return out;
+}
+
+
+// ---- src/kernel/model.js ----
+// model.js — buildModel(tables) -> one in-memory model every view reads. Pure.
+
+
+
+const HARD_CONSTRAINTS = new Set(['CS_MANDSTART', 'CS_MANDFIN', 'CS_MSO', 'CS_MEO']);
+
+function buildModel(parsed) {
+  const tables = parsed.tables || parsed; // accept parseXER output or bare map
+  const t = (name) => tables[name] || [];
+
+  // --- calendars ---
+  const calendars = new Map();
+  for (const row of t('CALENDAR')) calendars.set(row.clndr_id, makeCalendar(row));
+  const fallbackCal = defaultCalendar();
+  const calFor = (id) => (id !== undefined && calendars.has(id) ? calendars.get(id) : fallbackCal);
+
+  // --- project + data date ---
+  const project = t('PROJECT')[0] || {};
+  // No field named data_date exists in XER. last_recalc_date can be stamped at
+  // baseline creation (before the schedule even starts) — prefer
+  // last_schedule_date as the "as of" proxy when both exist.
+  let dataDate, dataDateSource = null;
+  if (project.last_schedule_date) {
+    dataDate = parseP6Date(project.last_schedule_date);
+    dataDateSource = 'last_schedule_date';
+  } else if (project.last_recalc_date) {
+    dataDate = parseP6Date(project.last_recalc_date);
+    dataDateSource = 'last_recalc_date';
+  }
+  const projectCal = calFor(project.clndr_id);
+
+  // --- WBS tree ---
+  const wbsById = new Map();
+  for (const row of t('PROJWBS')) {
+    wbsById.set(row.wbs_id, {
+      id: row.wbs_id,
+      parentId: row.parent_wbs_id,
+      shortName: row.wbs_short_name || '',
+      name: row.wbs_name || row.wbs_short_name || `WBS ${row.wbs_id}`,
+      isProjectNode: row.proj_node_flag === 'Y',
+      children: [], tasks: [],
+    });
+  }
+  let wbsRoot = null;
+  for (const node of wbsById.values()) {
+    const parent = node.parentId !== undefined ? wbsById.get(node.parentId) : undefined;
+    const isRoot = node.isProjectNode || !parent || node.parentId === node.id;
+    if (isRoot && !wbsRoot) { wbsRoot = node; continue; }
+    if (parent && parent !== node) parent.children.push(node);
+    else if (!wbsRoot) wbsRoot = node;
+  }
+  if (!wbsRoot) { // synthesize a root if no row qualifies
+    wbsRoot = { id: '__root', parentId: undefined, shortName: 'ROOT', name: 'Project', isProjectNode: true, children: [...wbsById.values()], tasks: [] };
+    wbsById.set('__root', wbsRoot);
+  } else {
+    // orphans (parent id missing from file) attach to root rather than vanish
+    for (const node of wbsById.values()) {
+      if (node === wbsRoot) continue;
+      const parent = wbsById.get(node.parentId);
+      if (!parent || parent === node) wbsRoot.children.push(node);
+    }
+  }
+
+  // --- resources ---
+  const rsrcById = new Map();
+  for (const row of t('RSRC')) {
+    rsrcById.set(row.rsrc_id, {
+      id: row.rsrc_id,
+      name: row.rsrc_name || row.rsrc_short_name || `Resource ${row.rsrc_id}`,
+      shortName: row.rsrc_short_name || '',
+      type: row.rsrc_type || 'RT_Labor',
+      maxQtyPerHr: undefined, // filled from RSRCRATE below; stays undefined when absent
+    });
+  }
+  for (const row of t('RSRCRATE')) {
+    const r = rsrcById.get(row.rsrc_id);
+    if (r) r.maxQtyPerHr = num(row.max_qty_per_hr);
+  }
+
+  // --- tasks ---
+  const tasks = [];
+  const taskById = new Map();
+  const taskByCode = new Map();
+  for (const row of t('TASK')) {
+    const cal = calFor(row.clndr_id);
+    const task = {
+      id: row.task_id,
+      code: row.task_code || row.task_id,
+      name: row.task_name || '',
+      wbsId: row.wbs_id,
+      status: row.status_code || 'TK_NotStart',
+      taskType: row.task_type,
+      targetStart: parseP6Date(row.target_start_date),
+      targetEnd: parseP6Date(row.target_end_date),
+      actStart: parseP6Date(row.act_start_date),
+      actEnd: parseP6Date(row.act_end_date),
+      totalFloatHrs: num(row.total_float_hr_cnt),
+      remainHrs: num(row.remain_drtn_hr_cnt),
+      // 0–100 convention, always. Never re-interpret small values as fractions.
+      physPct: num(row.phys_complete_pct),
+      cstrType: row.cstr_type,
+      cstrDate: parseP6Date(row.cstr_date),
+      clndrId: row.clndr_id,
+      cal,
+      raw: row,
+      // filled below
+      chainage: null, targetCost: 0, actualCost: 0, assignments: [],
+      milestone: false, origDays: undefined, floatDays: undefined,
+    };
+    task.milestone = task.taskType === 'TT_Mile' || task.taskType === 'TT_FinMile'
+      || (task.targetStart !== undefined && task.targetStart === task.targetEnd);
+    task.chainage = taskChainage(task);
+    if (task.targetStart !== undefined && task.targetEnd !== undefined) {
+      task.origDays = workingDaySpan(cal, task.targetStart, task.targetEnd);
+      if (task.milestone) task.origDays = 0;
+    }
+    if (task.totalFloatHrs !== undefined) {
+      const dh = cal.dayHrs || 8;
+      task.floatDays = task.totalFloatHrs / dh;
+    }
+    tasks.push(task);
+    taskById.set(task.id, task);
+    taskByCode.set(task.code, task);
+  }
+
+  // --- relationships ---
+  const preds = [];
+  for (const row of t('TASKPRED')) {
+    preds.push({
+      taskId: row.task_id,          // SUCCESSOR
+      predTaskId: row.pred_task_id, // PREDECESSOR
+      type: row.pred_type || 'PR_FS',
+      lagHrs: num(row.lag_hr_cnt),
+    });
+  }
+
+  // --- assignments / costs ---
+  const assignments = [];
+  for (const row of t('TASKRSRC')) {
+    const a = {
+      taskId: row.task_id,
+      rsrcId: row.rsrc_id,
+      targetCost: num(row.target_cost),
+      targetQty: num(row.target_qty),
+      actRegCost: num(row.act_reg_cost),
+      actOtCost: num(row.act_ot_cost),
+      actRegQty: num(row.act_reg_qty),
+      actOtQty: num(row.act_ot_qty),
+      remainQty: num(row.remain_qty),
+    };
+    assignments.push(a);
+    const task = taskById.get(a.taskId);
+    if (task) {
+      task.assignments.push(a);
+      task.targetCost += a.targetCost || 0;
+      task.actualCost += (a.actRegCost || 0) + (a.actOtCost || 0);
+    }
+  }
+
+  // --- attach tasks to WBS nodes ---
+  for (const task of tasks) {
+    const node = wbsById.get(task.wbsId);
+    if (node) node.tasks.push(task);
+    else wbsRoot.tasks.push(task);
+  }
+
+  const tablesSummary = Object.keys(tables).map((name) => ({ name, rows: tables[name].length }));
+
+  return {
+    project, dataDate, dataDateSource, projectCal,
+    calendars, defaultCal: fallbackCal,
+    wbsRoot, wbsById,
+    tasks, taskById, taskByCode,
+    preds, rsrcById, assignments,
+    tablesSummary,
+    header: parsed.header || null,
+    raw: tables,
+  };
+}
+
+
+// ---- src/kernel/cpm.js ----
+// cpm.js — a real forward/backward critical-path pass over the TASKPRED
+// network, in working-day units. Pure.
+//
+// Stated simplifications (documented, not hidden):
+//  - Durations are each task's original working-day span (from its own
+//    calendar); lags convert at the project calendar's hours-per-day.
+//  - The pass runs on logic alone from a common time zero — it is a logic
+//    integrity model (exactly what DCMA check 12 exercises), not a
+//    progress-retained reschedule. File float (total_float_hr_cnt) remains
+//    the source of truth for float-based checks.
+
+function runCPM(model, { durationOverride = null } = {}) {
+  const dayHrs = model.projectCal.dayHrs || 8;
+  const nodes = new Map(); // id -> {d, es, ef, ls, lf, succs:[], preds:[], inDeg}
+  for (const t of model.tasks) {
+    let d = t.milestone ? 0 : (t.origDays !== undefined ? t.origDays : 0);
+    if (durationOverride && durationOverride.has(t.id)) d = durationOverride.get(t.id);
+    nodes.set(t.id, { id: t.id, d, es: 0, ef: d, ls: Infinity, lf: Infinity, succs: [], preds: [], inDeg: 0 });
+  }
+  for (const p of model.preds) {
+    const a = nodes.get(p.predTaskId), b = nodes.get(p.taskId);
+    if (!a || !b) continue;
+    const lag = (p.lagHrs || 0) / dayHrs;
+    a.succs.push({ to: b, type: p.type, lag });
+    b.preds.push({ from: a, type: p.type, lag });
+    b.inDeg++;
+  }
+
+  // Kahn topological order; if a cycle exists, report it instead of looping.
+  const order = [];
+  const q = [];
+  for (const n of nodes.values()) if (n.inDeg === 0) q.push(n);
+  const deg = new Map();
+  for (const n of nodes.values()) deg.set(n, n.inDeg);
+  while (q.length) {
+    const n = q.shift();
+    order.push(n);
+    for (const e of n.succs) {
+      deg.set(e.to, deg.get(e.to) - 1);
+      if (deg.get(e.to) === 0) q.push(e.to);
+    }
+  }
+  const cyclic = order.length < nodes.size;
+  if (cyclic) return { cyclic: true, nodes, order: [], finishDays: undefined };
+
+  // Forward pass.
+  for (const n of order) {
+    for (const e of n.preds) {
+      const { from, type, lag } = e;
+      let minEs;
+      switch (type) {
+        case 'PR_SS': minEs = from.es + lag; break;
+        case 'PR_FF': minEs = from.ef + lag - n.d; break;
+        case 'PR_SF': minEs = from.es + lag - n.d; break;
+        default:      minEs = from.ef + lag; // PR_FS
+      }
+      if (minEs > n.es) n.es = minEs;
+    }
+    n.ef = n.es + n.d;
+  }
+  let finishDays = 0;
+  for (const n of order) if (n.ef > finishDays) finishDays = n.ef;
+
+  // Backward pass.
+  for (const n of order) { n.lf = finishDays; n.ls = finishDays - n.d; }
+  for (let i = order.length - 1; i >= 0; i--) {
+    const n = order[i];
+    for (const e of n.succs) {
+      const s = e.to;
+      let maxLf;
+      switch (e.type) {
+        case 'PR_SS': maxLf = s.ls - e.lag + n.d; break;
+        case 'PR_FF': maxLf = s.lf - e.lag; break;
+        case 'PR_SF': maxLf = s.lf - e.lag + n.d; break; // pred start drives succ finish
+        default:      maxLf = s.ls - e.lag; // PR_FS
+      }
+      if (maxLf < n.lf) n.lf = maxLf;
+    }
+    n.ls = n.lf - n.d;
+  }
+  for (const n of order) n.tf = n.ls - n.es;
+
+  return { cyclic: false, nodes, order, finishDays };
+}
+
+// DCMA check 12 — Critical Path Test: extend a driving activity's duration
+// and confirm the project finish shifts by the same amount.
+function criticalPathTest(model, extendBy = 100) {
+  const base = runCPM(model);
+  if (base.cyclic) return { status: 'na', reason: 'Relationship network contains a cycle — CPM pass not possible.' };
+  // pick a driving activity: critical (tf ≈ 0 or less), real duration, on the finish path
+  let pick = null;
+  for (const n of base.order) {
+    if (n.d > 0 && n.tf <= 1e-9 && (!pick || n.d > pick.d)) pick = n;
+  }
+  if (!pick) return { status: 'na', reason: 'No critical activity with duration > 0 found to perturb.' };
+  const perturbed = runCPM(model, { durationOverride: new Map([[pick.id, pick.d + extendBy]]) });
+  if (perturbed.cyclic) return { status: 'na', reason: 'Network became cyclic during perturbation (should not happen).' };
+  const shift = perturbed.finishDays - base.finishDays;
+  const pass = Math.abs(shift - extendBy) < 1e-6;
+  const task = model.taskById.get(pick.id);
+  return {
+    status: pass ? 'pass' : 'fail',
+    tested: task ? task.code : pick.id,
+    extendBy, shift,
+    baseFinishDays: base.finishDays,
+    reason: pass
+      ? `Extended ${task ? task.code : pick.id} by ${extendBy} working days; project finish moved exactly ${shift} days.`
+      : `Extended ${task ? task.code : pick.id} by ${extendBy} working days but project finish moved ${shift} days — constraints or broken logic are absorbing the slip.`,
+  };
+}
+
+
+// ---- src/kernel/evm.js ----
+// evm.js — PV/EV/AC/SPI/CPI/EAC/TCPI per PMI/AACE convention. Pure.
+//
+// The one rule that must never erode: a single XER file contains ONE
+// time-phased plan and ONE snapshot of actuals. PV is a legitimate full
+// curve; EV and AC are exactly one point each, at the data date. Nothing in
+// this module produces a historical EV/AC series, and no view may invent one.
+
+
+// Earned % for one activity at asOfDate. phys_complete_pct is 0–100, always
+// divided by 100 — there is no valid P6 convention where it is natively 0–1.
+// Fallback is schedule-elapsed, clamped [0,1], forced to 0 with no actual
+// start: an unstarted activity has 0% earned even if its window has elapsed.
+function computeEarnedPct(task, asOf) {
+  if (task.status === 'TK_Complete') return 1;
+  if (task.physPct !== undefined && task.physPct !== 0) {
+    return Math.min(Math.max(task.physPct / 100, 0), 1);
+  }
+  if (task.actStart === undefined) return 0;
+  if (task.targetStart === undefined || task.targetEnd === undefined || asOf === undefined) return 0;
+  const span = task.targetEnd - task.targetStart;
+  if (span <= 0) return 0;
+  return Math.min(Math.max((asOf - task.targetStart) / span, 0), 1);
+}
+
+function computeEVM(model, gran = 'month') {
+  const asOf = model.dataDate;
+  const pvMap = new Map();
+  let bac = 0, ev = 0, ac = 0;
+  for (const task of model.tasks) {
+    const cost = task.targetCost || 0;
+    bac += cost;
+    ac += task.actualCost || 0;
+    if (cost > 0) {
+      ev += cost * computeEarnedPct(task, asOf);
+      spreadAcrossPeriods(task.cal, task.targetStart, task.targetEnd, cost, gran, pvMap);
+    }
+  }
+
+  const keys = [...pvMap.keys()].sort();
+  let cum = 0;
+  const pv = keys.map((key) => {
+    const planned = pvMap.get(key);
+    cum += planned;
+    return { key, start: periodStart(key, gran), planned, cum };
+  });
+
+  // PV at the data date: cumulative plan cost of all working days <= data date.
+  let pvAtDD;
+  if (asOf !== undefined) {
+    pvAtDD = 0;
+    for (const task of model.tasks) {
+      const cost = task.targetCost || 0;
+      if (cost <= 0 || task.targetStart === undefined || task.targetEnd === undefined) continue;
+      const a = dayFloor(task.targetStart), b = dayFloor(task.targetEnd), dd = dayFloor(asOf);
+      if (dd < a) continue;
+      if (dd >= b) { pvAtDD += cost; continue; }
+      let total = 0, upto = 0;
+      for (let d = a; d <= b; d += DAY_MS) {
+        const h = hoursOnDay(task.cal, d);
+        total += h;
+        if (d <= dd) upto += h;
+      }
+      pvAtDD += total > 0 ? cost * (upto / total) : cost;
+    }
+  }
+
+  // N/A vs zero, kept distinct on purpose:
+  //  - PV legitimately 0 (data date before schedule start) -> SPI not computable.
+  //  - PV > 0 with EV 0 -> a real, alarming SPI of 0.
+  const spi = pvAtDD === undefined ? { value: null, reason: 'No data date in file — PV at "now" is undefined.' }
+    : pvAtDD === 0 ? { value: null, reason: 'PV is 0 at the data date (data date precedes plan start) — SPI not computable.' }
+    : { value: ev / pvAtDD };
+  const cpi = ac === 0
+    ? (ev === 0 ? { value: null, reason: 'No actual cost and no earned value recorded yet — CPI not computable.' }
+                : { value: null, reason: 'Earned value exists but actual cost is 0 — check TASKRSRC actuals.' })
+    : { value: ev / ac };
+
+  const eac = cpi.value ? ac + (bac - ev) / cpi.value : undefined;
+  const etc = eac !== undefined ? eac - ac : undefined;
+  const vac = eac !== undefined ? bac - eac : undefined;
+  const tcpi = bac - ac !== 0 ? (bac - ev) / (bac - ac) : undefined;
+  const earnedPct = bac > 0 ? ev / bac : undefined;
+
+  return {
+    gran, pv, pvAtDD,
+    evPoint: asOf !== undefined ? { date: asOf, value: ev } : null,
+    acPoint: asOf !== undefined ? { date: asOf, value: ac } : null,
+    bac, ev, ac, spi, cpi, eac, etc, vac, tcpi, earnedPct,
+  };
+}
+
+
+// ---- src/kernel/wbs.js ----
+// wbs.js — cost-weighted WBS rollup. Pure.
+//
+// pctComplete(node) = Σ(cost × earnedPct) / Σ(cost) over the node's whole
+// subtree, all evaluated at ONE real "as of" date (the model's data date) —
+// never "latest end date in the dataset", which equals project finish and
+// makes every started activity look ~100% done.
+
+
+function rollupWBS(model) {
+  const asOf = model.dataDate;
+  const stats = new Map(); // wbsId -> stat
+
+  const visit = (node) => {
+    const s = {
+      id: node.id, name: node.name, shortName: node.shortName,
+      cost: 0, earned: 0, actual: 0,
+      taskCount: 0, done: 0, active: 0, notStarted: 0, critical: 0,
+      pct: undefined, children: [],
+    };
+    for (const task of node.tasks) {
+      s.taskCount++;
+      s.cost += task.targetCost || 0;
+      s.earned += (task.targetCost || 0) * computeEarnedPct(task, asOf);
+      s.actual += task.actualCost || 0;
+      if (task.status === 'TK_Complete') s.done++;
+      else if (task.status === 'TK_Active') s.active++;
+      else s.notStarted++;
+      if (task.totalFloatHrs !== undefined && task.totalFloatHrs <= 0 && task.status !== 'TK_Complete') s.critical++;
+    }
+    for (const child of node.children) {
+      const cs = visit(child);
+      s.children.push(cs.id);
+      s.cost += cs.cost; s.earned += cs.earned; s.actual += cs.actual;
+      s.taskCount += cs.taskCount; s.done += cs.done; s.active += cs.active;
+      s.notStarted += cs.notStarted; s.critical += cs.critical;
+    }
+    // cost-weighted % — undefined (not 0) when the subtree carries no cost
+    s.pct = s.cost > 0 ? s.earned / s.cost : undefined;
+    stats.set(node.id, s);
+    return s;
+  };
+
+  const root = visit(model.wbsRoot);
+  return { root, stats };
+}
+
+
+// ---- src/kernel/dcma.js ----
+// dcma.js — the DCMA 14-Point Assessment, per DCMA's published spec. Pure.
+//
+// Every check that needs a baseline or a missing field returns
+// {value: null, status: 'na', reason: '<what is missing>'} — never a
+// silently-substituted default.
+
+
+
+
+const pctCheck = (bad, total, limit, dir = 'lt') => {
+  if (total === 0) return { value: null, status: 'na', reason: 'No population to measure (0 items).' };
+  const pct = bad / total;
+  const ok = dir === 'lt' ? pct < limit : pct >= limit;
+  return { value: pct, status: ok ? 'pass' : 'fail' };
+};
+
+function runAllChecks(model, { baseline = null } = {}) {
+  const tasks = model.tasks;
+  const rels = model.preds;
+  const dd = model.dataDate;
+  const cal = model.projectCal;
+  const nonMilestone = tasks.filter((t) => !t.milestone);
+  const checks = [];
+  const push = (id, name, threshold, formula, r) => checks.push({ id, name, threshold, formula, ...r });
+
+  // 1 — Logic
+  {
+    const hasPred = new Set(rels.map((r) => r.taskId));
+    const hasSucc = new Set(rels.map((r) => r.predTaskId));
+    const offenders = nonMilestone.filter((t) => !hasPred.has(t.id) || !hasSucc.has(t.id));
+    push(1, 'Logic', '< 5% missing links',
+      'Non-milestone activities missing a predecessor and/or successor ÷ total non-milestone activities',
+      { ...pctCheck(offenders.length, nonMilestone.length, 0.05), count: offenders.length, total: nonMilestone.length, offenders: offenders.map((t) => t.id) });
+  }
+  // 2 — Leads
+  {
+    const offenders = rels.filter((r) => (r.lagHrs || 0) < 0);
+    push(2, 'Leads', '< 5% of relationships',
+      'Relationships with negative lag ÷ total relationships',
+      { ...pctCheck(offenders.length, rels.length, 0.05), count: offenders.length, total: rels.length, offenders: offenders.map((r) => `${r.predTaskId}→${r.taskId}`) });
+  }
+  // 3 — Lags
+  {
+    const offenders = rels.filter((r) => (r.lagHrs || 0) > 0);
+    push(3, 'Lags', '< 5% of relationships',
+      'Relationships with positive lag ÷ total relationships',
+      { ...pctCheck(offenders.length, rels.length, 0.05), count: offenders.length, total: rels.length, offenders: offenders.map((r) => `${r.predTaskId}→${r.taskId}`) });
+  }
+  // 4 — Relationship types
+  {
+    const fs = rels.filter((r) => r.type === 'PR_FS').length;
+    push(4, 'Relationship types', '≥ 90% Finish-to-Start',
+      'Finish-to-Start relationships ÷ total relationships',
+      { ...pctCheck(fs, rels.length, 0.90, 'ge'), count: fs, total: rels.length, offenders: rels.filter((r) => r.type !== 'PR_FS').map((r) => `${r.predTaskId}→${r.taskId} (${r.type})`) });
+  }
+  // 5 — Hard constraints
+  {
+    const offenders = tasks.filter((t) => t.cstrType && HARD_CONSTRAINTS.has(t.cstrType));
+    push(5, 'Hard constraints', '< 5% of activities',
+      'Activities with Mandatory Start/Finish or Start/Finish-On constraints ÷ total activities',
+      { ...pctCheck(offenders.length, tasks.length, 0.05), count: offenders.length, total: tasks.length, offenders: offenders.map((t) => t.id) });
+  }
+  // 6 — High float (> 44 working days)
+  {
+    const pool = tasks.filter((t) => t.status !== 'TK_Complete');
+    const measurable = pool.filter((t) => t.floatDays !== undefined);
+    if (measurable.length === 0) {
+      push(6, 'High float', '< 5% of activities', 'Activities with total float > 44 working days ÷ total incomplete activities',
+        { value: null, status: 'na', reason: 'total_float_hr_cnt not populated in this file.' });
+    } else {
+      const offenders = measurable.filter((t) => t.floatDays > 44);
+      push(6, 'High float', '< 5% of activities',
+        'Activities with total float > 44 working days ÷ total incomplete activities',
+        { ...pctCheck(offenders.length, measurable.length, 0.05), count: offenders.length, total: measurable.length, offenders: offenders.map((t) => t.id) });
+    }
+  }
+  // 7 — Negative float
+  {
+    const measurable = tasks.filter((t) => t.totalFloatHrs !== undefined && t.status !== 'TK_Complete');
+    if (measurable.length === 0) {
+      push(7, 'Negative float', '0 activities', 'Count of incomplete activities with total float < 0',
+        { value: null, status: 'na', reason: 'total_float_hr_cnt not populated in this file.' });
+    } else {
+      const offenders = measurable.filter((t) => t.totalFloatHrs < 0);
+      push(7, 'Negative float', '0 activities', 'Count of incomplete activities with total float < 0',
+        { value: offenders.length, status: offenders.length === 0 ? 'pass' : 'fail', count: offenders.length, total: measurable.length, offenders: offenders.map((t) => t.id) });
+    }
+  }
+  // 8 — High duration (> 44 working days)
+  {
+    const pool = nonMilestone.filter((t) => t.status !== 'TK_Complete' && t.origDays !== undefined);
+    const offenders = pool.filter((t) => t.origDays > 44);
+    push(8, 'High duration', '< 5% of activities',
+      'Incomplete non-milestone activities with original duration > 44 working days ÷ total such activities',
+      { ...pctCheck(offenders.length, pool.length, 0.05), count: offenders.length, total: pool.length, offenders: offenders.map((t) => t.id) });
+  }
+  // 9 — Invalid dates
+  {
+    if (dd === undefined) {
+      push(9, 'Invalid dates', '0 activities', 'Actual dates after the data date, or forecast dates before it',
+        { value: null, status: 'na', reason: 'No data date proxy (last_schedule_date / last_recalc_date) in file.' });
+    } else {
+      const ddDay = dayFloor(dd);
+      const offenders = [];
+      for (const t of tasks) {
+        if ((t.actStart !== undefined && dayFloor(t.actStart) > ddDay)
+          || (t.actEnd !== undefined && dayFloor(t.actEnd) > ddDay)) {
+          offenders.push({ id: t.id, why: `actual date after data date (${fmtDate(dd)})` });
+        } else if (t.status === 'TK_NotStart' && t.targetStart !== undefined && dayFloor(t.targetStart) < ddDay) {
+          offenders.push({ id: t.id, why: 'forecast start before data date (not started, not rescheduled)' });
+        }
+      }
+      push(9, 'Invalid dates', '0 activities', 'Actual dates after the data date, or forecast dates before it',
+        { value: offenders.length, status: offenders.length === 0 ? 'pass' : 'fail', count: offenders.length, total: tasks.length, offenders: offenders.map((o) => o.id), detail: offenders });
+    }
+  }
+  // 10 — Resources (informational)
+  {
+    const pool = nonMilestone;
+    const offenders = pool.filter((t) => t.assignments.length === 0);
+    const r = pctCheck(offenders.length, pool.length, 1.0);
+    push(10, 'Resources', 'informational',
+      'Non-milestone activities with no resource assignment ÷ total non-milestone activities',
+      { value: r.value, status: pool.length === 0 ? 'na' : 'info', reason: pool.length === 0 ? 'No non-milestone activities.' : undefined, count: offenders.length, total: pool.length, offenders: offenders.map((t) => t.id) });
+  }
+  // 11 — Missed tasks (needs baseline)
+  {
+    if (!baseline) {
+      push(11, 'Missed tasks', '< 5% of baselined activities',
+        'Baselined activities whose current finish is later than baseline finish ÷ total matched',
+        { value: null, status: 'na', reason: 'Requires a baseline file — none loaded.' });
+    } else {
+      let matched = 0; const offenders = [];
+      for (const t of tasks) {
+        const b = baseline.taskByCode.get(t.code);
+        if (!b || b.targetEnd === undefined) continue;
+        matched++;
+        const curFinish = t.actEnd !== undefined ? t.actEnd : t.targetEnd;
+        if (curFinish !== undefined && dayFloor(curFinish) > dayFloor(b.targetEnd)) offenders.push(t.id);
+      }
+      push(11, 'Missed tasks', '< 5% of baselined activities',
+        'Baselined activities whose current finish is later than baseline finish ÷ total matched',
+        { ...pctCheck(offenders.length, matched, 0.05), count: offenders.length, total: matched, offenders });
+    }
+  }
+  // 12 — Critical Path Test (real CPM perturbation — never a fake pass)
+  {
+    const r = criticalPathTest(model);
+    push(12, 'Critical Path Test', 'finish shifts by the full extension',
+      'Extend a driving activity\'s duration by N working days via a real CPM forward/backward pass; project finish must shift by exactly N',
+      r.status === 'na' ? { value: null, status: 'na', reason: r.reason }
+        : { value: r.shift / r.extendBy, status: r.status, reason: r.reason, detail: r });
+  }
+  // 13 — CPLI (needs baseline)
+  {
+    if (!baseline) {
+      push(13, 'CPLI', '≥ 0.95',
+        '(critical path length + total float of the activity driving project finish) ÷ critical path length, working days',
+        { value: null, status: 'na', reason: 'Requires a baseline finish to measure against — none loaded.' });
+    } else if (dd === undefined) {
+      push(13, 'CPLI', '≥ 0.95', 'CPL-based ratio', { value: null, status: 'na', reason: 'No data date in file.' });
+    } else {
+      // driving activity = incomplete task with the latest current finish
+      // among those with minimum total float — its float, NOT a sum.
+      const pool = tasks.filter((t) => t.status !== 'TK_Complete' && t.totalFloatHrs !== undefined && t.targetEnd !== undefined);
+      if (pool.length === 0) {
+        push(13, 'CPLI', '≥ 0.95', 'CPL-based ratio', { value: null, status: 'na', reason: 'No incomplete activities with float and finish dates.' });
+      } else {
+        const minFloat = Math.min(...pool.map((t) => t.totalFloatHrs));
+        const driving = pool.filter((t) => t.totalFloatHrs === minFloat)
+          .reduce((a, b) => (a.targetEnd >= b.targetEnd ? a : b));
+        const projFinish = Math.max(...pool.map((t) => t.targetEnd));
+        const cpl = workingDaysBetween(cal, dd, projFinish);
+        if (!cpl || cpl <= 0) {
+          push(13, 'CPLI', '≥ 0.95', 'CPL-based ratio', { value: null, status: 'na', reason: 'Critical path length is 0 working days (data date at/after finish).' });
+        } else {
+          const floatDays = driving.totalFloatHrs / (driving.cal.dayHrs || 8);
+          const cpli = (cpl + floatDays) / cpl;
+          push(13, 'CPLI', '≥ 0.95',
+            `(CPL ${cpl}d + driving activity ${driving.code} float ${floatDays.toFixed(1)}d) ÷ CPL ${cpl}d`,
+            { value: cpli, status: cpli >= 0.95 ? 'pass' : 'fail', detail: { cpl, floatDays, driving: driving.code } });
+        }
+      }
+    }
+  }
+  // 14 — BEI (needs baseline)
+  {
+    if (!baseline) {
+      push(14, 'BEI', '≥ 0.95',
+        'Activities actually finished by the data date ÷ activities baselined to finish by the data date',
+        { value: null, status: 'na', reason: 'Requires a baseline file — none loaded.' });
+    } else if (dd === undefined) {
+      push(14, 'BEI', '≥ 0.95', 'finished ÷ planned-to-finish', { value: null, status: 'na', reason: 'No data date in file.' });
+    } else {
+      const ddDay = dayFloor(dd);
+      let planned = 0, done = 0;
+      for (const t of tasks) {
+        const b = baseline.taskByCode.get(t.code);
+        if (!b || b.targetEnd === undefined) continue;
+        if (dayFloor(b.targetEnd) <= ddDay) planned++;
+        if (t.actEnd !== undefined && dayFloor(t.actEnd) <= ddDay) done++;
+      }
+      if (planned === 0) {
+        push(14, 'BEI', '≥ 0.95', 'finished ÷ planned-to-finish', { value: null, status: 'na', reason: 'No activities were baselined to finish by the data date.' });
+      } else {
+        const bei = done / planned;
+        push(14, 'BEI', '≥ 0.95', `${done} finished ÷ ${planned} baselined to finish by ${fmtDate(dd)}`,
+          { value: bei, status: bei >= 0.95 ? 'pass' : 'fail', count: done, total: planned });
+      }
+    }
+  }
+
+  return checks;
+}
+
+
+
+// ---- src/kernel/resource.js ----
+// resource.js — demand buckets + over-allocation. Pure.
+//
+// Over-allocation is only computable for resources that carry a
+// RSRCRATE.max_qty_per_hr ceiling. For everything else the honest answer is
+// "ceiling unavailable" — never an assumed default (a prior build defaulted
+// missing ceilings to 1 and flagged nearly everything).
+
+
+function resourceDemand(model, gran = 'week') {
+  const byType = new Map();   // rsrc_type -> Map(periodKey -> qty)
+  const byRsrc = new Map();   // rsrc_id  -> Map(periodKey -> qty)
+  const allKeys = new Set();
+
+  for (const a of model.assignments) {
+    const task = model.taskById.get(a.taskId);
+    const rsrc = model.rsrcById.get(a.rsrcId);
+    if (!task || !rsrc) continue;
+    const qty = a.targetQty;
+    if (qty === undefined || task.targetStart === undefined || task.targetEnd === undefined) continue;
+    if (!byType.has(rsrc.type)) byType.set(rsrc.type, new Map());
+    if (!byRsrc.has(rsrc.id)) byRsrc.set(rsrc.id, new Map());
+    spreadAcrossPeriods(task.cal, task.targetStart, task.targetEnd, qty, gran, byType.get(rsrc.type));
+    spreadAcrossPeriods(task.cal, task.targetStart, task.targetEnd, qty, gran, byRsrc.get(rsrc.id));
+  }
+  for (const m of byType.values()) for (const k of m.keys()) allKeys.add(k);
+  const keys = [...allKeys].sort();
+
+  // Over-allocation: average demanded qty/hr in a period vs max_qty_per_hr.
+  const overalloc = [];
+  const noCeiling = [];
+  for (const [rid, periods] of byRsrc) {
+    const rsrc = model.rsrcById.get(rid);
+    if (rsrc.maxQtyPerHr === undefined) {
+      if ([...periods.values()].some((v) => v > 0)) noCeiling.push(rsrc);
+      continue;
+    }
+    for (const [key, qty] of periods) {
+      const hrs = periodWorkingHours(model.projectCal, key, gran);
+      if (hrs <= 0) continue;
+      const avgPerHr = qty / hrs;
+      // 5% tolerance: calendar exceptions (half-days) compress a task's hour
+      // density slightly; only clear breaches are worth a planner's time.
+      if (avgPerHr > rsrc.maxQtyPerHr * 1.05) {
+        overalloc.push({
+          rsrc, key, start: periodStart(key, gran), qty,
+          avgPerHr, maxPerHr: rsrc.maxQtyPerHr,
+          ratio: avgPerHr / rsrc.maxQtyPerHr,
+        });
+      }
+    }
+  }
+  overalloc.sort((a, b) => b.ratio - a.ratio);
+
+  return { gran, keys, byType, byRsrc, overalloc, noCeiling };
+}
+
+function periodWorkingHours(cal, key, gran) {
+  const start = periodStart(key, gran);
+  const days = gran === 'week' ? 7 : new Date(Date.UTC(new Date(start).getUTCFullYear(), new Date(start).getUTCMonth() + 1, 0)).getUTCDate();
+  let hrs = 0;
+  for (let i = 0; i < days; i++) hrs += hoursOnDay(cal, dayFloor(start) + i * DAY_MS);
+  return hrs;
+}
+
+
+// ---- src/kernel/compare.js ----
+// compare.js — baseline-vs-current matching and diff. Pure.
+//
+// Activities are matched by task_code (P6 can renumber task_id across
+// re-imports; codes are the stable join key). Added/removed activities are
+// reported explicitly, never silently dropped. Critical-path shift is a set
+// difference of {total float <= 0} between files — deliberately not a full
+// re-derived CPM sequence diff.
+
+
+function compareModels(current, baseline) {
+  const matched = [];
+  const added = [];   // in current, not in baseline
+  const removed = []; // in baseline, not in current
+
+  for (const t of current.tasks) {
+    const b = baseline.taskByCode.get(t.code);
+    if (!b) { added.push(t); continue; }
+    const curFinish = t.actEnd !== undefined ? t.actEnd : t.targetEnd;
+    const baseFinish = b.targetEnd;
+    let slipDays;
+    if (curFinish !== undefined && baseFinish !== undefined) {
+      slipDays = workingDaysBetween(t.cal, Math.min(baseFinish, curFinish), Math.max(baseFinish, curFinish));
+      if (dayFloor(curFinish) < dayFloor(baseFinish)) slipDays = -slipDays;
+    }
+    matched.push({ code: t.code, cur: t, base: b, slipDays, curFinish, baseFinish });
+  }
+  for (const b of baseline.tasks) {
+    if (!current.taskByCode.has(b.code)) removed.push(b);
+  }
+  matched.sort((a, b2) => (b2.slipDays ?? -Infinity) - (a.slipDays ?? -Infinity));
+
+  // WBS-level variance: cost-weighted mean slip, keyed by the CURRENT file's
+  // WBS placement of each matched activity.
+  const wbsVar = new Map();
+  for (const m of matched) {
+    if (m.slipDays === undefined) continue;
+    const w = m.cur.targetCost || 0;
+    const node = current.wbsById.get(m.cur.wbsId);
+    const id = node ? node.id : '__none';
+    if (!wbsVar.has(id)) wbsVar.set(id, { node, cost: 0, weighted: 0, count: 0, worst: null });
+    const v = wbsVar.get(id);
+    v.cost += w; v.weighted += w * m.slipDays; v.count++;
+    if (!v.worst || m.slipDays > v.worst.slipDays) v.worst = m;
+  }
+  const wbsVariance = [...wbsVar.values()].map((v) => ({
+    ...v,
+    meanSlip: v.cost > 0 ? v.weighted / v.cost : undefined, // uncosted subtree => N/A, not 0
+  })).sort((a, b2) => (b2.meanSlip ?? -Infinity) - (a.meanSlip ?? -Infinity));
+
+  // Critical set shift (float <= 0, incomplete, measurable float only)
+  const critSet = (m) => new Set(m.tasks
+    .filter((t) => t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete')
+    .map((t) => t.code));
+  const curCrit = critSet(current);
+  const baseCrit = critSet(baseline);
+  const nowCritical = [...curCrit].filter((c) => !baseCrit.has(c)).map((c) => current.taskByCode.get(c));
+  const leftCritical = [...baseCrit].filter((c) => !curCrit.has(c))
+    .map((c) => current.taskByCode.get(c) || baseline.taskByCode.get(c));
+
+  return { matched, added, removed, wbsVariance, nowCritical, leftCritical, curCritCount: curCrit.size, baseCritCount: baseCrit.size };
+}
+
+
+// ---- src/data/demo.js ----
+// GENERATED by tools/make-fixture.js — do not edit by hand.
+const DEMO_NAME = 'najd-s2-update.xer';
+const BASELINE_NAME = 'najd-s2-baseline.xer';
+const DEMO_XER = "ERMHDR\t19.12\t2026-07-01\tProject\tadmin\tPRISM demo export\tdbxDatabaseNoName\tProject Management\tSAR\n%T\tCALENDAR\n%F\tclndr_id\tclndr_name\tday_hr_cnt\tclndr_data\n%R\t100\tNAJD Site — Sun-Thu 8h (KSA)\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|07:00|f|15:00)())))(0||2()((0||0(s|07:00|f|15:00)())))(0||3()((0||0(s|07:00|f|15:00)())))(0||4()((0||0(s|07:00|f|15:00)())))(0||5()((0||0(s|07:00|f|15:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()((0||0(d|45923)())(0||1(d|46100)())(0||2(d|46103)())(0||3(d|46104)())(0||4(d|46099)((0||0(s|07:00|f|11:00)())))))))\n%R\t101\tNAJD Office — Sun-Thu 8h\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|08:00|f|16:00)())))(0||2()((0||0(s|08:00|f|16:00)())))(0||3()((0||0(s|08:00|f|16:00)())))(0||4()((0||0(s|08:00|f|16:00)())))(0||5()((0||0(s|08:00|f|16:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()())))\n%T\tPROJECT\n%F\tproj_id\tproj_short_name\tplan_start_date\tplan_end_date\tlast_recalc_date\tlast_schedule_date\tclndr_id\n%R\t1001\tNAJD-S2\t2025-09-07 07:00\t2026-09-09 15:00\t2025-08-15 08:00\t2026-07-01 07:00\t100\n%T\tPROJWBS\n%F\twbs_id\tparent_wbs_id\twbs_short_name\twbs_name\tproj_node_flag\n%R\t5000\t\tNAJD-S2\tNAJD Water Transmission — Section 2\tY\n%R\t5010\t5000\tGEN\tGeneral & Milestones\tN\n%R\t5020\t5000\tPROC\tProcurement\tN\n%R\t5030\t5000\tPIPE\tPipeline Works\tN\n%R\t5031\t5030\tSEG-A\tSegment A — KP512+000 to KP518+000\tN\n%R\t5032\t5030\tSEG-B\tSegment B — KP518+000 to KP524+000\tN\n%R\t5033\t5030\tSEG-C\tSegment C — KP524+000 to KP530+000\tN\n%R\t5034\t5030\tSEG-D\tSegment D — KP530+000 to KP536+000\tN\n%R\t5040\t5000\tSTX\tStations & Crossings\tN\n%R\t5050\t5000\tTC\tTesting & Commissioning\tN\n%T\tRSRC\n%F\trsrc_id\trsrc_short_name\trsrc_name\trsrc_type\n%R\t201\tEW-CREW\tEarthworks Crew\tRT_Labor\n%R\t202\tWELD-CREW\tWelding & NDT Crew\tRT_Labor\n%R\t203\tSIDEBOOM\tSideboom Spread\tRT_Equip\n%R\t204\tEXCAV\t30t Excavator Fleet\tRT_Equip\n%R\t205\tPIPE-48\tPipe 48in CS API 5L\tRT_Mat\n%R\t206\tHDD-RIG\tHDD Maxi Rig\tRT_Equip\n%R\t207\tQAQC\tQA/QC Engineers\tRT_Labor\n%T\tRSRCRATE\n%F\trsrc_rate_id\trsrc_id\tmax_qty_per_hr\n%R\t301\t201\t2\n%R\t302\t202\t2\n%R\t303\t203\t1\n%R\t304\t206\t1\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10001\tA-000\tNotice to Proceed\t5010\t1001\tTT_Mile\tTK_Complete\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 15:00\t\t0\t100\t\t\t100\n%R\t10002\tA-010\tMobilization & Temporary Works\t5010\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2025-10-05 15:00\t2025-09-07 07:00\t2025-10-05 15:00\t\t0\t100\t\t\t100\n%R\t10003\tA-020\tSite Facilities & Access Roads\t5010\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-11-16 15:00\t2025-10-06 07:00\t2025-11-16 15:00\t\t0\t100\t\t\t100\n%R\t10004\tP-010\tPipe Mill Order & Manufacture\t5020\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2026-02-08 15:00\t2025-09-07 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t101\n%R\t10005\tP-020\tPipe Delivery Lot 1 — Segments A and B\t5020\t1001\tTT_Task\tTK_Complete\t2026-01-12 07:00\t2026-02-01 15:00\t2026-01-12 07:00\t2026-02-01 15:00\t\t0\t100\t\t\t101\n%R\t10006\tP-030\tPipe Delivery Lot 2 — Segments C and D\t5020\t1001\tTT_Task\tTK_Active\t2026-05-07 07:00\t2026-05-27 15:00\t2026-06-18 07:00\t\t160\t48\t60\t\t\t101\n%R\t10007\tP-040\tValves & Fittings Procurement\t5020\t1001\tTT_Task\tTK_NotStart\t2026-06-18 07:00\t2026-07-15 15:00\t\t\t480\t160\t\t\t\t101\n%R\t10008\tS31-010\tSurvey & Set-out KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-10-12 15:00\t2025-10-06 07:00\t2025-10-12 15:00\t\t0\t100\t\t\t100\n%R\t10009\tS31-020\tROW Clearing & Grading KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-13 07:00\t2025-10-28 15:00\t2025-10-13 07:00\t2025-10-28 15:00\t\t0\t100\t\t\t100\n%R\t10010\tS31-030\tTrench Excavation KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-29 07:00\t2025-12-02 15:00\t2025-10-29 07:00\t2025-12-02 15:00\t\t0\t100\t\t\t100\n%R\t10011\tS31-040\tPipe Stringing KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-05 07:00\t2025-11-18 15:00\t2025-11-05 07:00\t2025-11-18 15:00\t\t0\t100\t\t\t100\n%R\t10012\tS31-050\tWelding & NDT KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-19 07:00\t2025-12-30 15:00\t2025-11-19 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10013\tS31-060\tLower-in & Backfill KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-01-25 15:00\t2025-12-31 07:00\t2026-01-25 15:00\t\t0\t100\t\t\t100\n%R\t10014\tS31-070\tReinstatement KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2026-01-26 07:00\t2026-02-08 15:00\t2026-01-26 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t100\n%R\t10015\tS32-010\tSurvey & Set-out KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-08 07:00\t2025-12-14 15:00\t2025-12-08 07:00\t2025-12-14 15:00\t\t0\t100\t\t\t100\n%R\t10016\tS32-020\tROW Clearing & Grading KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-15 07:00\t2025-12-30 15:00\t2025-12-15 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10017\tS32-030\tTrench Excavation KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-02-03 15:00\t2025-12-31 07:00\t2026-02-03 15:00\t\t0\t100\t\t\t100\n%R\t10018\tS32-040\tPipe Stringing KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-07 07:00\t2026-01-20 15:00\t2026-01-07 07:00\t2026-01-20 15:00\t\t0\t100\t\t\t100\n%R\t10019\tS32-050\tWelding & NDT KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-21 07:00\t2026-03-03 15:00\t2026-01-21 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10020\tS32-060\tLower-in & Backfill KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-01 15:00\t2026-03-04 07:00\t2026-04-01 15:00\t\t0\t100\t\t\t100\n%R\t10021\tS32-070\tReinstatement KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-04-02 07:00\t2026-04-15 15:00\t2026-04-02 07:00\t2026-04-15 15:00\t\t0\t100\t\t\t100\n%R\t10022\tS33-010\tSurvey & Set-out KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-09 07:00\t2026-02-15 15:00\t2026-02-09 07:00\t2026-02-15 15:00\t\t0\t100\t\t\t100\n%T\tTASKPRED\n%F\ttask_pred_id\ttask_id\tpred_task_id\tpred_type\tlag_hr_cnt\n%R\t20001\t10002\t10001\tPR_FS\t0\n%R\t20002\t10003\t10002\tPR_FS\t0\n%R\t20003\t10004\t10001\tPR_FS\t0\n%R\t20004\t10005\t10004\tPR_FF\t80\n%R\t20005\t10006\t10004\tPR_FS\t0\n%R\t20006\t10007\t10004\tPR_FS\t0\n%R\t20007\t10008\t10003\tPR_FS\t0\n%R\t20008\t10009\t10008\tPR_FS\t0\n%R\t20009\t10010\t10009\tPR_FS\t0\n%R\t20010\t10011\t10010\tPR_SS\t40\n%R\t20011\t10011\t10005\tPR_FS\t0\n%R\t20012\t10012\t10011\tPR_FS\t0\n%R\t20013\t10013\t10012\tPR_FS\t0\n%R\t20014\t10014\t10013\tPR_FS\t0\n%R\t20015\t10015\t10009\tPR_FS\t0\n%R\t20016\t10016\t10015\tPR_FS\t0\n%R\t20017\t10017\t10016\tPR_FS\t0\n%R\t20018\t10018\t10017\tPR_SS\t40\n%R\t20019\t10019\t10018\tPR_FS\t0\n%R\t20020\t10020\t10019\tPR_FS\t0\n%R\t20021\t10021\t10020\tPR_FS\t0\n%R\t20022\t10022\t10016\tPR_FS\t0\n%R\t20023\t10023\t10022\tPR_FS\t0\n%R\t20024\t10024\t10023\tPR_FS\t0\n%R\t20025\t10025\t10024\tPR_SS\t40\n%R\t20026\t10026\t10025\tPR_FS\t0\n%R\t20027\t10027\t10026\tPR_FS\t0\n%R\t20028\t10028\t10027\tPR_FS\t0\n%R\t20029\t10029\t10023\tPR_FS\t0\n%R\t20030\t10030\t10029\tPR_FS\t0\n%R\t20031\t10031\t10030\tPR_FS\t0\n%R\t20032\t10032\t10031\tPR_SS\t40\n%R\t20033\t10032\t10006\tPR_FS\t0\n%R\t20034\t10033\t10032\tPR_FS\t0\n%R\t20035\t10034\t10033\tPR_FS\t0\n%R\t20036\t10035\t10034\tPR_FS\t0\n%R\t20037\t10036\t10024\tPR_FS\t-40\n%R\t20038\t10037\t10035\tPR_FS\t0\n%R\t20039\t10039\t10034\tPR_FS\t0\n%R\t20040\t10039\t10028\tPR_FS\t0\n%R\t20041\t10039\t10014\tPR_FS\t0\n%R\t20042\t10039\t10021\tPR_FS\t0\n%R\t20043\t10039\t10036\tPR_FS\t0\n%R\t20044\t10039\t10007\tPR_FS\t0\n%R\t20045\t10040\t10026\tPR_FS\t0\n%R\t20046\t10041\t10039\tPR_FS\t0\n%R\t20047\t10041\t10040\tPR_FS\t0\n%R\t20048\t10042\t10041\tPR_FS\t0\n%R\t20049\t10042\t10038\tPR_FS\t0\n%R\t20050\t10043\t10042\tPR_FS\t80\n%T\tTASKRSRC\n%F\ttaskrsrc_id\ttask_id\trsrc_id\ttarget_cost\ttarget_qty\tact_reg_cost\tact_ot_cost\tact_reg_qty\tact_ot_qty\tremain_qty\n%R\t30001\t10002\t201\t1500000\t160\t1551000\t99000\t160\t\t0\n%R\t30002\t10003\t204\t1200000\t240\t1184400\t75600\t240\t\t0\n%R\t30003\t10004\t205\t2000000\t0\t1917600\t122400\t\t\t0\n%R\t30004\t10005\t205\t800000\t0\t752000\t48000\t\t\t0\n%R\t30005\t10006\t205\t800000\t0\t466240\t29760\t\t\t0\n%R\t30006\t10007\t207\t600000\t0\t\t\t\t\t0\n%R\t30007\t10008\t207\t120000\t40\t121824\t7776\t40\t\t0\n%R\t30008\t10009\t201\t300000\t96\t304560\t19440\t96\t\t0\n%R\t30009\t10009\t204\t150000\t96\t152280\t9720\t96\t\t0\n%R\t30010\t10010\t201\t800000\t200\t812160\t51840\t200\t\t0\n%R\t30011\t10010\t204\t600000\t200\t609120\t38880\t200\t\t0\n%R\t30012\t10011\t203\t600000\t80\t609120\t38880\t80\t\t0\n%R\t30013\t10011\t205\t3200000\t6000\t3248640\t207360\t6000\t\t0\n%R\t30014\t10012\t202\t1800000\t240\t1827360\t116640\t240\t\t0\n%R\t30015\t10013\t203\t500000\t144\t507600\t32400\t144\t\t0\n%R\t30016\t10013\t201\t400000\t144\t406080\t25920\t144\t\t0\n%R\t30017\t10014\t201\t400000\t80\t406080\t25920\t80\t\t0\n%R\t30018\t10015\t207\t120000\t40\t126336\t8064\t40\t\t0\n%R\t30019\t10016\t201\t300000\t96\t315840\t20160\t96\t\t0\n%R\t30020\t10016\t204\t150000\t96\t157920\t10080\t96\t\t0\n%R\t30021\t10017\t201\t800000\t200\t842240\t53760\t200\t\t0\n%R\t30022\t10017\t204\t600000\t200\t631680\t40320\t200\t\t0\n%R\t30023\t10018\t203\t600000\t80\t631680\t40320\t80\t\t0\n%R\t30024\t10018\t205\t3200000\t6000\t3368960\t215040\t6000\t\t0\n%R\t30025\t10019\t202\t1800000\t240\t1895040\t120960\t240\t\t0\n%R\t30026\t10020\t203\t500000\t144\t526400\t33600\t144\t\t0\n%R\t30027\t10020\t201\t400000\t144\t421120\t26880\t144\t\t0\n%R\t30028\t10021\t201\t400000\t80\t421120\t26880\t80\t\t0\n%R\t30029\t10022\t207\t120000\t40\t122952\t7848\t40\t\t0\n%R\t30030\t10023\t201\t300000\t96\t307380\t19620\t96\t\t0\n%R\t30031\t10023\t204\t150000\t96\t153690\t9810\t96\t\t0\n%R\t30032\t10024\t201\t800000\t200\t819680\t52320\t200\t\t0\n%R\t30033\t10024\t204\t600000\t200\t614760\t39240\t200\t\t0\n%R\t30034\t10025\t203\t600000\t80\t614760\t39240\t80\t\t0\n%R\t30035\t10025\t205\t3200000\t6000\t3278720\t209280\t6000\t\t0\n%R\t30036\t10026\t202\t1800000\t240\t963636\t61509\t137\t\t103\n%R\t30037\t10027\t203\t500000\t144\t\t\t\t\t144\n%R\t30038\t10027\t201\t400000\t144\t\t\t\t\t144\n%R\t30039\t10028\t201\t400000\t80\t\t\t\t\t80\n%R\t30040\t10029\t207\t120000\t40\t119568\t7632\t40\t\t0\n%R\t30041\t10030\t201\t300000\t96\t85192\t5438\t29\t\t67\n%R\t30042\t10030\t204\t150000\t96\t42596\t2719\t29\t\t67\n%R\t30043\t10031\t201\t800000\t200\t\t\t\t\t200\n%R\t30044\t10031\t204\t600000\t200\t\t\t\t\t200\n%R\t30045\t10032\t203\t600000\t80\t\t\t\t\t80\n%R\t30046\t10032\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30047\t10033\t202\t1800000\t368\t\t\t\t\t368\n%R\t30048\t10034\t203\t500000\t144\t\t\t\t\t144\n%R\t30049\t10034\t201\t400000\t144\t\t\t\t\t144\n%R\t30050\t10035\t201\t400000\t80\t\t\t\t\t80\n%R\t30051\t10036\t206\t2500000\t280\t1292500\t82500\t154\t\t126\n%R\t30052\t10037\t202\t700000\t80\t\t\t\t\t80\n%R\t30053\t10038\t207\t900000\t200\t\t\t\t\t200\n%R\t30054\t10039\t207\t500000\t120\t\t\t\t\t120\n%R\t30055\t10040\t202\t300000\t40\t\t\t\t\t40\n%R\t30056\t10041\t207\t400000\t96\t\t\t\t\t96\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10023\tS33-020\tROW Clearing & Grading KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-16 07:00\t2026-03-03 15:00\t2026-02-16 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10024\tS33-030\tTrench Excavation KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-12 15:00\t2026-03-04 07:00\t2026-04-12 15:00\t\t0\t100\t\t\t100\n%R\t10025\tS33-040\tPipe Stringing KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-11 07:00\t2026-03-29 15:00\t2026-03-11 07:00\t2026-03-29 15:00\t\t0\t100\t\t\t100\n%R\t10026\tS33-050\tWelding & NDT KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Active\t2026-03-30 07:00\t2026-05-10 15:00\t2026-04-09 07:00\t\t0\t120\t55\t\t\t100\n%R\t10027\tS33-060\tLower-in & Backfill KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-03 15:00\t\t\t0\t144\t\t\t\t100\n%R\t10028\tS33-070\tReinstatement KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-06-04 07:00\t2026-06-17 15:00\t\t\t40\t80\t\t\t\t100\n%R\t10029\tS34-010\tSurvey & Set-out KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Complete\t2026-04-16 07:00\t2026-04-22 15:00\t2026-04-16 07:00\t2026-04-22 15:00\t\t0\t100\t\t\t100\n%R\t10030\tS34-020\tROW Clearing & Grading KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Active\t2026-04-23 07:00\t2026-05-10 15:00\t2026-05-07 07:00\t\t-40\t80\t30\t\t\t100\n%R\t10031\tS34-030\tTrench Excavation KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-14 15:00\t\t\t-40\t200\t\t\t\t100\n%R\t10032\tS34-040\tPipe Stringing KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-18 07:00\t2026-05-31 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10033\tS34-050\tWelding & NDT KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-06-01 07:00\t2026-08-03 15:00\t\t\t-40\t368\t\t\t\t100\n%R\t10034\tS34-060\tLower-in & Backfill KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-07-13 07:00\t2026-08-05 15:00\t\t\t-40\t144\t\t\t\t100\n%R\t10035\tS34-070\tReinstatement KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-08-19 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10036\tC-010\tWadi Hanifa HDD Crossing KP529+800\t5040\t1001\tTT_Task\tTK_Active\t2026-03-26 07:00\t2026-05-13 15:00\t2026-04-13 07:00\t\t24\t160\t45\t\t\t100\n%R\t10037\tC-020\tPump Station 2 Tie-in KP536+000\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-27 07:00\t2026-09-09 15:00\t\t\t40\t80\t\tCS_MEO\t2026-09-02 15:00\t100\n%R\t10038\tC-030\tCathodic Protection System — Section 2 Mainline\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-09-09 15:00\t\t\t120\t200\t\t\t\t100\n%R\t10039\tT-010\tHydrostatic Test — Section 2 Mainline\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-30 07:00\t2026-08-19 15:00\t\t\t-40\t120\t\t\t\t100\n%R\t10040\tT-020\tGolden Weld Tie-in KP518+400\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-08-27 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10041\tT-030\tPre-commissioning & Dewatering\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-09-07 15:00\t\t\t-40\t96\t\t\t\t100\n%R\t10042\tM-100\tSection 2 Mechanical Completion\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\tCS_MANDFIN\t2026-09-01 15:00\t100\n%R\t10043\tM-110\tHandover to Operations\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\t\t\t100\n%E\n";
+const BASELINE_XER = "ERMHDR\t19.12\t2025-08-15\tProject\tadmin\tPRISM demo export\tdbxDatabaseNoName\tProject Management\tSAR\n%T\tCALENDAR\n%F\tclndr_id\tclndr_name\tday_hr_cnt\tclndr_data\n%R\t100\tNAJD Site — Sun-Thu 8h (KSA)\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|07:00|f|15:00)())))(0||2()((0||0(s|07:00|f|15:00)())))(0||3()((0||0(s|07:00|f|15:00)())))(0||4()((0||0(s|07:00|f|15:00)())))(0||5()((0||0(s|07:00|f|15:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()((0||0(d|45923)())(0||1(d|46100)())(0||2(d|46103)())(0||3(d|46104)())(0||4(d|46099)((0||0(s|07:00|f|11:00)())))))))\n%R\t101\tNAJD Office — Sun-Thu 8h\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|08:00|f|16:00)())))(0||2()((0||0(s|08:00|f|16:00)())))(0||3()((0||0(s|08:00|f|16:00)())))(0||4()((0||0(s|08:00|f|16:00)())))(0||5()((0||0(s|08:00|f|16:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()())))\n%T\tPROJECT\n%F\tproj_id\tproj_short_name\tplan_start_date\tplan_end_date\tlast_recalc_date\tlast_schedule_date\tclndr_id\n%R\t1001\tNAJD-S2\t2025-09-07 07:00\t2026-08-05 15:00\t2025-08-15 08:00\t\t100\n%T\tPROJWBS\n%F\twbs_id\tparent_wbs_id\twbs_short_name\twbs_name\tproj_node_flag\n%R\t5000\t\tNAJD-S2\tNAJD Water Transmission — Section 2\tY\n%R\t5010\t5000\tGEN\tGeneral & Milestones\tN\n%R\t5020\t5000\tPROC\tProcurement\tN\n%R\t5030\t5000\tPIPE\tPipeline Works\tN\n%R\t5031\t5030\tSEG-A\tSegment A — KP512+000 to KP518+000\tN\n%R\t5032\t5030\tSEG-B\tSegment B — KP518+000 to KP524+000\tN\n%R\t5033\t5030\tSEG-C\tSegment C — KP524+000 to KP530+000\tN\n%R\t5034\t5030\tSEG-D\tSegment D — KP530+000 to KP536+000\tN\n%R\t5040\t5000\tSTX\tStations & Crossings\tN\n%R\t5050\t5000\tTC\tTesting & Commissioning\tN\n%T\tRSRC\n%F\trsrc_id\trsrc_short_name\trsrc_name\trsrc_type\n%R\t201\tEW-CREW\tEarthworks Crew\tRT_Labor\n%R\t202\tWELD-CREW\tWelding & NDT Crew\tRT_Labor\n%R\t203\tSIDEBOOM\tSideboom Spread\tRT_Equip\n%R\t204\tEXCAV\t30t Excavator Fleet\tRT_Equip\n%R\t205\tPIPE-48\tPipe 48in CS API 5L\tRT_Mat\n%R\t206\tHDD-RIG\tHDD Maxi Rig\tRT_Equip\n%R\t207\tQAQC\tQA/QC Engineers\tRT_Labor\n%T\tRSRCRATE\n%F\trsrc_rate_id\trsrc_id\tmax_qty_per_hr\n%R\t301\t201\t2\n%R\t302\t202\t2\n%R\t303\t203\t1\n%R\t304\t206\t1\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10001\tA-000\tNotice to Proceed\t5010\t1001\tTT_Mile\tTK_NotStart\t2025-09-07 07:00\t2025-09-07 07:00\t\t\t80\t0\t\t\t\t100\n%R\t10002\tA-010\tMobilization & Temporary Works\t5010\t1001\tTT_Task\tTK_NotStart\t2025-09-07 07:00\t2025-10-05 15:00\t\t\t80\t160\t\t\t\t100\n%R\t10003\tA-020\tSite Facilities & Access Roads\t5010\t1001\tTT_Task\tTK_NotStart\t2025-10-06 07:00\t2025-11-16 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10004\tP-010\tPipe Mill Order & Manufacture\t5020\t1001\tTT_Task\tTK_NotStart\t2025-09-07 07:00\t2026-02-08 15:00\t\t\t80\t880\t\t\t\t101\n%R\t10005\tP-020\tPipe Delivery Lot 1 — Segments A and B\t5020\t1001\tTT_Task\tTK_NotStart\t2026-01-12 07:00\t2026-02-01 15:00\t\t\t80\t120\t\t\t\t101\n%R\t10006\tP-030\tPipe Delivery Lot 2 — Segments C and D\t5020\t1001\tTT_Task\tTK_NotStart\t2026-04-09 07:00\t2026-04-29 15:00\t\t\t80\t120\t\t\t\t101\n%R\t10007\tP-040\tValves & Fittings Procurement\t5020\t1001\tTT_Task\tTK_NotStart\t2026-05-21 07:00\t2026-06-17 15:00\t\t\t480\t160\t\t\t\t101\n%R\t10008\tS31-010\tSurvey & Set-out KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-06 07:00\t2025-10-12 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10009\tS31-020\tROW Clearing & Grading KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-13 07:00\t2025-10-28 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10010\tS31-030\tTrench Excavation KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-29 07:00\t2025-12-02 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10011\tS31-040\tPipe Stringing KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-11-05 07:00\t2025-11-18 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10012\tS31-050\tWelding & NDT KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-11-19 07:00\t2025-12-30 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10013\tS31-060\tLower-in & Backfill KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-12-31 07:00\t2026-01-25 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10014\tS31-070\tReinstatement KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2026-01-26 07:00\t2026-02-08 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10015\tS31-025\tDewatering Trial KP513+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-20 07:00\t2025-10-29 15:00\t\t\t80\t64\t\t\t\t100\n%R\t10016\tS32-010\tSurvey & Set-out KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-01 07:00\t2025-12-07 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10017\tS32-020\tROW Clearing & Grading KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-08 07:00\t2025-12-23 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10018\tS32-030\tTrench Excavation KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-24 07:00\t2026-01-27 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10019\tS32-040\tPipe Stringing KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-31 07:00\t2026-01-13 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10020\tS32-050\tWelding & NDT KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-01-14 07:00\t2026-02-24 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10021\tS32-060\tLower-in & Backfill KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-02-25 07:00\t2026-03-25 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10022\tS32-070\tReinstatement KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-03-26 07:00\t2026-04-08 15:00\t\t\t80\t80\t\t\t\t100\n%T\tTASKPRED\n%F\ttask_pred_id\ttask_id\tpred_task_id\tpred_type\tlag_hr_cnt\n%R\t20001\t10002\t10001\tPR_FS\t0\n%R\t20002\t10003\t10002\tPR_FS\t0\n%R\t20003\t10004\t10001\tPR_FS\t0\n%R\t20004\t10005\t10004\tPR_FF\t80\n%R\t20005\t10006\t10004\tPR_FS\t0\n%R\t20006\t10007\t10004\tPR_FS\t0\n%R\t20007\t10008\t10003\tPR_FS\t0\n%R\t20008\t10009\t10008\tPR_FS\t0\n%R\t20009\t10010\t10009\tPR_FS\t0\n%R\t20010\t10011\t10010\tPR_SS\t40\n%R\t20011\t10011\t10005\tPR_FS\t0\n%R\t20012\t10012\t10011\tPR_FS\t0\n%R\t20013\t10013\t10012\tPR_FS\t0\n%R\t20014\t10014\t10013\tPR_FS\t0\n%R\t20015\t10015\t10009\tPR_FS\t0\n%R\t20016\t10016\t10009\tPR_FS\t0\n%R\t20017\t10017\t10016\tPR_FS\t0\n%R\t20018\t10018\t10017\tPR_FS\t0\n%R\t20019\t10019\t10018\tPR_SS\t40\n%R\t20020\t10020\t10019\tPR_FS\t0\n%R\t20021\t10021\t10020\tPR_FS\t0\n%R\t20022\t10022\t10021\tPR_FS\t0\n%R\t20023\t10023\t10017\tPR_FS\t0\n%R\t20024\t10024\t10023\tPR_FS\t0\n%R\t20025\t10025\t10024\tPR_FS\t0\n%R\t20026\t10026\t10025\tPR_SS\t40\n%R\t20027\t10027\t10026\tPR_FS\t0\n%R\t20028\t10028\t10027\tPR_FS\t0\n%R\t20029\t10029\t10028\tPR_FS\t0\n%R\t20030\t10030\t10024\tPR_FS\t0\n%R\t20031\t10031\t10030\tPR_FS\t0\n%R\t20032\t10032\t10031\tPR_FS\t0\n%R\t20033\t10033\t10032\tPR_SS\t40\n%R\t20034\t10033\t10006\tPR_FS\t0\n%R\t20035\t10034\t10033\tPR_FS\t0\n%R\t20036\t10035\t10034\tPR_FS\t0\n%R\t20037\t10036\t10035\tPR_FS\t0\n%R\t20038\t10037\t10025\tPR_FS\t-40\n%R\t20039\t10038\t10036\tPR_FS\t0\n%R\t20040\t10039\t10035\tPR_FS\t0\n%R\t20041\t10039\t10029\tPR_FS\t0\n%R\t20042\t10039\t10014\tPR_FS\t0\n%R\t20043\t10039\t10022\tPR_FS\t0\n%R\t20044\t10039\t10037\tPR_FS\t0\n%R\t20045\t10039\t10007\tPR_FS\t0\n%R\t20046\t10040\t10027\tPR_FS\t0\n%R\t20047\t10041\t10039\tPR_FS\t0\n%R\t20048\t10041\t10040\tPR_FS\t0\n%R\t20049\t10042\t10041\tPR_FS\t0\n%R\t20050\t10043\t10042\tPR_FS\t80\n%T\tTASKRSRC\n%F\ttaskrsrc_id\ttask_id\trsrc_id\ttarget_cost\ttarget_qty\tact_reg_cost\tact_ot_cost\tact_reg_qty\tact_ot_qty\tremain_qty\n%R\t30001\t10002\t201\t1500000\t160\t\t\t\t\t160\n%R\t30002\t10003\t204\t1200000\t240\t\t\t\t\t240\n%R\t30003\t10004\t205\t2000000\t0\t\t\t\t\t0\n%R\t30004\t10005\t205\t800000\t0\t\t\t\t\t0\n%R\t30005\t10006\t205\t800000\t0\t\t\t\t\t0\n%R\t30006\t10007\t207\t600000\t0\t\t\t\t\t0\n%R\t30007\t10008\t207\t120000\t40\t\t\t\t\t40\n%R\t30008\t10009\t201\t300000\t96\t\t\t\t\t96\n%R\t30009\t10009\t204\t150000\t96\t\t\t\t\t96\n%R\t30010\t10010\t201\t800000\t200\t\t\t\t\t200\n%R\t30011\t10010\t204\t600000\t200\t\t\t\t\t200\n%R\t30012\t10011\t203\t600000\t80\t\t\t\t\t80\n%R\t30013\t10011\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30014\t10012\t202\t1800000\t240\t\t\t\t\t240\n%R\t30015\t10013\t203\t500000\t144\t\t\t\t\t144\n%R\t30016\t10013\t201\t400000\t144\t\t\t\t\t144\n%R\t30017\t10014\t201\t400000\t80\t\t\t\t\t80\n%R\t30018\t10015\t204\t250000\t64\t\t\t\t\t64\n%R\t30019\t10016\t207\t120000\t40\t\t\t\t\t40\n%R\t30020\t10017\t201\t300000\t96\t\t\t\t\t96\n%R\t30021\t10017\t204\t150000\t96\t\t\t\t\t96\n%R\t30022\t10018\t201\t800000\t200\t\t\t\t\t200\n%R\t30023\t10018\t204\t600000\t200\t\t\t\t\t200\n%R\t30024\t10019\t203\t600000\t80\t\t\t\t\t80\n%R\t30025\t10019\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30026\t10020\t202\t1800000\t240\t\t\t\t\t240\n%R\t30027\t10021\t203\t500000\t144\t\t\t\t\t144\n%R\t30028\t10021\t201\t400000\t144\t\t\t\t\t144\n%R\t30029\t10022\t201\t400000\t80\t\t\t\t\t80\n%R\t30030\t10023\t207\t120000\t40\t\t\t\t\t40\n%R\t30031\t10024\t201\t300000\t96\t\t\t\t\t96\n%R\t30032\t10024\t204\t150000\t96\t\t\t\t\t96\n%R\t30033\t10025\t201\t800000\t200\t\t\t\t\t200\n%R\t30034\t10025\t204\t600000\t200\t\t\t\t\t200\n%R\t30035\t10026\t203\t600000\t80\t\t\t\t\t80\n%R\t30036\t10026\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30037\t10027\t202\t1800000\t240\t\t\t\t\t240\n%R\t30038\t10028\t203\t500000\t144\t\t\t\t\t144\n%R\t30039\t10028\t201\t400000\t144\t\t\t\t\t144\n%R\t30040\t10029\t201\t400000\t80\t\t\t\t\t80\n%R\t30041\t10030\t207\t120000\t40\t\t\t\t\t40\n%R\t30042\t10031\t201\t300000\t96\t\t\t\t\t96\n%R\t30043\t10031\t204\t150000\t96\t\t\t\t\t96\n%R\t30044\t10032\t201\t800000\t200\t\t\t\t\t200\n%R\t30045\t10032\t204\t600000\t200\t\t\t\t\t200\n%R\t30046\t10033\t203\t600000\t80\t\t\t\t\t80\n%R\t30047\t10033\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30048\t10034\t202\t1800000\t240\t\t\t\t\t240\n%R\t30049\t10035\t203\t500000\t144\t\t\t\t\t144\n%R\t30050\t10035\t201\t400000\t144\t\t\t\t\t144\n%R\t30051\t10036\t201\t400000\t80\t\t\t\t\t80\n%R\t30052\t10037\t206\t2500000\t280\t\t\t\t\t280\n%R\t30053\t10038\t202\t700000\t80\t\t\t\t\t80\n%R\t30054\t10039\t207\t500000\t120\t\t\t\t\t120\n%R\t30055\t10040\t202\t300000\t40\t\t\t\t\t40\n%R\t30056\t10041\t207\t400000\t96\t\t\t\t\t96\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10023\tS33-010\tSurvey & Set-out KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-01-26 07:00\t2026-02-01 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10024\tS33-020\tROW Clearing & Grading KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-02 07:00\t2026-02-17 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10025\tS33-030\tTrench Excavation KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-18 07:00\t2026-03-29 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10026\tS33-040\tPipe Stringing KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-25 07:00\t2026-03-10 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10027\tS33-050\tWelding & NDT KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-03-11 07:00\t2026-04-26 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10028\tS33-060\tLower-in & Backfill KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-04-27 07:00\t2026-05-20 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10029\tS33-070\tReinstatement KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-05-21 07:00\t2026-06-03 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10030\tS34-010\tSurvey & Set-out KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-03-26 07:00\t2026-04-01 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10031\tS34-020\tROW Clearing & Grading KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-02 07:00\t2026-04-19 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10032\tS34-030\tTrench Excavation KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-20 07:00\t2026-05-24 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10033\tS34-040\tPipe Stringing KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-27 07:00\t2026-05-10 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10034\tS34-050\tWelding & NDT KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-21 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10035\tS34-060\tLower-in & Backfill KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-06-22 07:00\t2026-07-15 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10036\tS34-070\tReinstatement KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-07-16 07:00\t2026-07-29 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10037\tC-010\tWadi Hanifa HDD Crossing KP529+800\t5040\t1001\tTT_Task\tTK_NotStart\t2026-03-09 07:00\t2026-04-29 15:00\t\t\t80\t280\t\t\t\t100\n%R\t10038\tC-020\tPump Station 2 Tie-in KP536+000\t5040\t1001\tTT_Task\tTK_NotStart\t2026-07-23 07:00\t2026-08-05 15:00\t\t\t40\t80\t\tCS_MEO\t2026-07-29 15:00\t100\n%R\t10039\tT-010\tHydrostatic Test — Section 2 Mainline\t5050\t1001\tTT_Task\tTK_NotStart\t2026-06-25 07:00\t2026-07-15 15:00\t\t\t0\t120\t\t\t\t100\n%R\t10040\tT-020\tGolden Weld Tie-in KP518+400\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-19 07:00\t2026-07-23 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10041\tT-030\tPre-commissioning & Dewatering\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-19 07:00\t2026-08-03 15:00\t\t\t0\t96\t\t\t\t100\n%R\t10042\tM-100\tSection 2 Mechanical Completion\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-08-04 07:00\t2026-08-04 07:00\t\t\t0\t0\t\tCS_MANDFIN\t2026-09-01 15:00\t100\n%R\t10043\tM-110\tHandover to Operations\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-08-04 07:00\t2026-08-04 07:00\t\t\t0\t0\t\t\t\t100\n%E\n";
+
+
+// ---- src/ui/modal.js ----
+// modal.js — the one detail-card primitive, built first, wired everywhere.
+// Contract: openModal(title, subtitle, bodyHtml, footerHtml).
+// Backdrop click and Escape close it. Focus trap is mandatory: Tab/Shift+Tab
+// cycle inside the card; focus returns to the triggering element on close.
+
+let modalPrevFocus = null;
+
+function closeModal() {
+  const back = document.querySelector('.modal-backdrop');
+  if (!back) return;
+  back.remove();
+  document.removeEventListener('keydown', modalKeydown, true);
+  if (modalPrevFocus && document.contains(modalPrevFocus)) modalPrevFocus.focus();
+  modalPrevFocus = null;
+}
+
+function modalFocusables(card) {
+  return [...card.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+    .filter((el) => !el.disabled && el.offsetParent !== null);
+}
+
+function modalKeydown(e) {
+  if (e.key === 'Escape') { e.preventDefault(); closeModal(); return; }
+  if (e.key !== 'Tab') return;
+  const card = document.querySelector('.modal-card');
+  if (!card) return;
+  const f = modalFocusables(card);
+  if (f.length === 0) { e.preventDefault(); return; }
+  const first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  else if (!card.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+}
+
+function openModal(title, subtitle, bodyHtml, footerHtml) {
+  closeModal();
+  modalPrevFocus = document.activeElement;
+  const back = document.createElement('div');
+  back.className = 'modal-backdrop';
+  back.innerHTML = `
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="${title.replace(/"/g, '&quot;')}">
+      <div class="modal-head">
+        <div><h3></h3><div class="sub"></div></div>
+        <button class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body"></div>
+      ${footerHtml ? '<div class="modal-foot"></div>' : ''}
+    </div>`;
+  back.querySelector('h3').textContent = title;
+  back.querySelector('.sub').textContent = subtitle || '';
+  back.querySelector('.modal-body').innerHTML = bodyHtml;
+  if (footerHtml) back.querySelector('.modal-foot').innerHTML = footerHtml;
+  back.addEventListener('click', (e) => { if (e.target === back) closeModal(); });
+  back.querySelector('.modal-close').addEventListener('click', closeModal);
+  document.body.appendChild(back);
+  document.addEventListener('keydown', modalKeydown, true);
+  const f = modalFocusables(back.querySelector('.modal-card'));
+  (f[0] || back.querySelector('.modal-close')).focus();
+  return back.querySelector('.modal-card');
+}
+
+
+// ---- src/ui/components.js ----
+// components.js — shared UI helpers. May touch DOM; never touches the kernel's
+// internals beyond reading the model.
+
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function fmtMoney(v, currency = 'SAR') {
+  if (v === undefined || v === null) return 'N/A';
+  const abs = Math.abs(v);
+  const s = abs >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : abs >= 1e3 ? (v / 1e3).toFixed(0) + 'k' : v.toFixed(0);
+  return `${s} ${currency}`;
+}
+
+function fmtRatio(v) {
+  return v === undefined || v === null ? null : v.toFixed(2);
+}
+
+function fmtPct(v, digits = 1) {
+  return v === undefined || v === null ? null : (v * 100).toFixed(digits) + '%';
+}
+
+// The non-negotiable: a missing value renders as an explicit N/A with a
+// reason, never a placeholder zero.
+function naTag(reason) {
+  return `<span class="na-tag" title="${esc(reason)}">N/A — ${esc(reason)}</span>`;
+}
+
+function valueOrNA(formatted, reason) {
+  return formatted === null || formatted === undefined ? naTag(reason || 'not in file') : `<span class="num">${esc(formatted)}</span>`;
+}
+
+function statusPill(status) {
+  const label = { pass: 'pass', fail: 'fail', warn: 'warn', na: 'n/a', info: 'info' }[status] || status;
+  return `<span class="pill ${esc(status)}">${esc(label)}</span>`;
+}
+
+const reducedMotion = () =>
+  window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Count-up for KPI numbers. Renders the final string immediately for
+// reduced-motion users; nothing downstream may depend on intermediate frames.
+function countUp(el, target, format = (v) => String(Math.round(v)), duration = 550) {
+  if (reducedMotion() || !Number.isFinite(target)) { el.textContent = format(target); return; }
+  const t0 = performance.now();
+  const step = (t) => {
+    const p = Math.min((t - t0) / duration, 1);
+    const eased = 1 - Math.pow(1 - p, 3);
+    el.textContent = format(target * eased);
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function statTile({ label, value, note, tone, id }) {
+  return `<button class="stat" data-stat="${esc(id)}">
+    <div class="label">${esc(label)}</div>
+    <div class="value ${esc(tone || '')}">${value}</div>
+    ${note ? `<div class="note">${note}</div>` : ''}
+  </button>`;
+}
+
+function taskLine(t) {
+  return `<span class="num">${esc(t.code)}</span> ${esc(t.name)}`;
+}
+
+function taskModalBody(t, model) {
+  const rows = [
+    ['Status', { TK_NotStart: 'Not started', TK_Active: 'In progress', TK_Complete: 'Complete' }[t.status] || t.status],
+    ['WBS', esc(model.wbsById.get(t.wbsId)?.name || t.wbsId)],
+    ['Planned', `<span class="num">${fmtDate(t.targetStart)} → ${fmtDate(t.targetEnd)}</span>`],
+    ['Actual', t.actStart !== undefined
+      ? `<span class="num">${fmtDate(t.actStart)} → ${t.actEnd !== undefined ? fmtDate(t.actEnd) : 'in progress'}</span>`
+      : naTag('no actual start recorded')],
+    ['Duration', t.origDays !== undefined ? `<span class="num">${t.origDays} wd</span>` : naTag('target dates missing')],
+    ['Total float', t.totalFloatHrs !== undefined ? `<span class="num">${(t.floatDays).toFixed(1)} wd</span>` : naTag('not populated (typical for completed work)')],
+    ['Physical %', t.physPct !== undefined ? `<span class="num">${t.physPct}%</span>` : naTag('not recorded')],
+    ['Budget', `<span class="num">${esc(fmtMoney(t.targetCost))}</span>`],
+    ['Actual cost', t.actualCost ? `<span class="num">${esc(fmtMoney(t.actualCost))}</span>` : naTag('no actuals booked')],
+    ['Constraint', t.cstrType ? `<span class="num">${esc(t.cstrType)} ${fmtDate(t.cstrDate)}</span>` : 'none'],
+    ['Chainage', t.chainage !== null ? `<span class="num">KP ${t.chainage.toFixed(3)}</span>` : naTag('no KP pattern in code/name')],
+    ['Calendar', esc(t.cal.name)],
+  ];
+  return `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`;
+}
+
+// ---------- canvas plumbing ----------
+
+// Sizes a canvas to its box at devicePixelRatio and calls draw(ctx, w, h).
+// Returns a redraw function; re-runs on resize.
+function mountCanvas(canvas, heightPx, draw) {
+  const render = () => {
+    const w = canvas.clientWidth || canvas.parentElement.clientWidth || 600;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.style.height = heightPx + 'px';
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(heightPx * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, heightPx);
+    draw(ctx, w, heightPx);
+  };
+  const ro = new ResizeObserver(() => render());
+  ro.observe(canvas.parentElement);
+  requestAnimationFrame(render);
+  return render;
+}
+
+function chartTip(box) {
+  let tip = box.querySelector('.chart-tip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.className = 'chart-tip';
+    box.appendChild(tip);
+  }
+  return {
+    show(html, x, y) {
+      tip.innerHTML = html;
+      tip.style.display = 'block';
+      const bw = box.clientWidth;
+      tip.style.left = Math.min(x + 14, bw - tip.offsetWidth - 6) + 'px';
+      tip.style.top = Math.max(y - tip.offsetHeight - 10, 4) + 'px';
+    },
+    hide() { tip.style.display = 'none'; },
+  };
+}
+
+// Hidden, screen-reader-exposed table beside every canvas chart — canvas has
+// no accessibility tree.
+function a11yTable(caption, headers, rows) {
+  return `<div class="visually-hidden"><table>
+    <caption>${esc(caption)}</caption>
+    <thead><tr>${headers.map((h) => `<th scope="col">${esc(h)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function ringSVG(pct, color, size = 52) {
+  const r = (size - 6) / 2;
+  const c = 2 * Math.PI * r;
+  const filled = pct === null || pct === undefined ? 0 : Math.min(Math.max(pct, 0), 1);
+  return `<svg width="${size}" height="${size}" aria-hidden="true">
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--raised-2)" stroke-width="5"/>
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="5"
+      stroke-linecap="round" stroke-dasharray="${(filled * c).toFixed(1)} ${c.toFixed(1)}"/>
+  </svg>`;
+}
+
+function offenderListHTML(offenders, model, cap = 24) {
+  if (!offenders || offenders.length === 0) return '<p class="sub" style="color:var(--dim)">No offending items.</p>';
+  const names = offenders.slice(0, cap).map((id) => {
+    const t = model.taskById.get(id);
+    return `<li>${esc(t ? t.code : id)}</li>`;
+  }).join('');
+  const more = offenders.length > cap ? `<li>… and ${offenders.length - cap} more</li>` : '';
+  return `<ul class="offender-list">${names}${more}</ul>`;
+}
+
+
+// ---- src/views/command.js ----
+// Command — portfolio KPI row + parse sanity list. Every stat opens a modal.
+
+
+
+const ViewCommand = {
+  id: 'command', title: 'Command', group: 'Overview',
+  chip(store) {
+    const m = store.model;
+    return m ? `as of <span class="num">${fmtDate(m.dataDate)}</span>` : '';
+  },
+  render(el, store) {
+    const m = store.model;
+    const { evm, dcma, rollup } = store.d;
+    const critical = m.tasks.filter((t) => t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete');
+    const dcmaPass = dcma.filter((c) => c.status === 'pass').length;
+    const dcmaNA = dcma.filter((c) => c.status === 'na').length;
+
+    const spiTone = evm.spi.value === null ? '' : evm.spi.value >= 0.95 ? 'good' : evm.spi.value >= 0.85 ? 'warn' : 'bad';
+    const cpiTone = evm.cpi.value === null ? '' : evm.cpi.value >= 0.95 ? 'good' : evm.cpi.value >= 0.85 ? 'warn' : 'bad';
+
+    el.innerHTML = `
+      <div class="banner">
+        <b>${esc(store.modelName)}</b>
+        <span>data date ${fmtDate(m.dataDate)} (from <span class="num">${esc(m.dataDateSource || 'n/a')}</span>)</span>
+        <span>plan ${fmtDate(m.project.plan_start_date && m.tasks[0] ? m.tasks.reduce((a, t) => Math.min(a, t.targetStart ?? a), Infinity) : undefined)} → ${fmtDate(m.tasks.reduce((a, t) => Math.max(a, t.targetEnd ?? a), 0))}</span>
+        ${store.baseline ? `<span>baseline <b>${esc(store.baselineName)}</b></span>` : `<span>${naTag('no baseline loaded — compare & 3 DCMA checks unavailable')}</span>`}
+      </div>
+
+      <div class="section">
+        <h2>Portfolio</h2>
+        <p class="sub">Click any figure for its derivation.</p>
+        <div class="statrow">
+          ${statTile({ id: 'acts', label: 'Activities', value: '<span data-count="acts">0</span>', note: `${m.preds.length} relationships` })}
+          ${statTile({ id: 'spi', label: 'SPI', value: valueOrNA(fmtRatio(evm.spi.value), evm.spi.reason), tone: spiTone, note: 'EV ÷ PV at data date' })}
+          ${statTile({ id: 'cpi', label: 'CPI', value: valueOrNA(fmtRatio(evm.cpi.value), evm.cpi.reason), tone: cpiTone, note: 'EV ÷ AC' })}
+          ${statTile({ id: 'earned', label: '% Earned', value: valueOrNA(fmtPct(evm.earnedPct), 'no costs in file'), note: `of ${fmtMoney(evm.bac)} BAC` })}
+          ${statTile({ id: 'crit', label: 'Critical', value: `<span data-count="crit">0</span>`, note: 'float ≤ 0, incomplete', tone: critical.length ? 'bad' : 'good' })}
+          ${statTile({ id: 'dcma', label: 'DCMA', value: `<span class="num">${dcmaPass}/${14 - dcmaNA}</span>`, note: dcmaNA ? `${dcmaNA} not computable` : 'all computable', tone: dcmaPass >= 10 ? 'good' : 'warn' })}
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Tables parsed</h2>
+        <p class="sub">Raw parse sanity — one in-memory model feeds every view.</p>
+        <div class="tablewrap"><table class="ledger">
+          <thead><tr><th>Table</th><th class="num">Rows</th><th>Fields present</th></tr></thead>
+          <tbody>
+            ${m.tablesSummary.map((t) => `<tr class="rowlink" data-table="${esc(t.name)}" tabindex="0">
+              <td class="num">${esc(t.name)}</td><td class="num">${t.rows}</td>
+              <td style="color:var(--dim)">${esc(Object.keys((m.raw[t.name] || [])[0] || {}).slice(0, 6).join(', '))}${Object.keys((m.raw[t.name] || [])[0] || {}).length > 6 ? '…' : ''}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>
+      </div>`;
+
+    countUp(el.querySelector('[data-count="acts"]'), m.tasks.length, (v) => String(Math.round(v)));
+    countUp(el.querySelector('[data-count="crit"]'), critical.length, (v) => String(Math.round(v)));
+
+    const statModals = {
+      acts: () => openModal('Activities', `${m.tasks.length} in file`, `
+        <dl>
+          <dt>Total</dt><dd class="num">${m.tasks.length}</dd>
+          <dt>Complete</dt><dd class="num">${m.tasks.filter((t) => t.status === 'TK_Complete').length}</dd>
+          <dt>In progress</dt><dd class="num">${m.tasks.filter((t) => t.status === 'TK_Active').length}</dd>
+          <dt>Not started</dt><dd class="num">${m.tasks.filter((t) => t.status === 'TK_NotStart').length}</dd>
+          <dt>Milestones</dt><dd class="num">${m.tasks.filter((t) => t.milestone).length}</dd>
+          <dt>Relationships</dt><dd class="num">${m.preds.length}</dd>
+        </dl>`),
+      spi: () => openModal('Schedule Performance Index', 'EVM per PMI/AACE convention', `
+        <kbd class="formula">SPI = EV ÷ PV at the data date = ${fmtMoney(evm.ev)} ÷ ${evm.pvAtDD !== undefined ? fmtMoney(evm.pvAtDD) : 'N/A'}</kbd>
+        <p>${evm.spi.value === null ? esc(evm.spi.reason) : `The project has earned <b class="num">${fmtPct(evm.ev / evm.bac)}</b> of BAC against <b class="num">${fmtPct(evm.pvAtDD / evm.bac)}</b> planned by ${fmtDate(m.dataDate)}.`}</p>
+        <p style="color:var(--dim);font-size:12.5px">EV and AC are single points at the data date — one XER file carries one snapshot of actuals, so no EV/AC history is shown anywhere in this tool.</p>`),
+      cpi: () => openModal('Cost Performance Index', 'EVM per PMI/AACE convention', `
+        <kbd class="formula">CPI = EV ÷ AC = ${fmtMoney(evm.ev)} ÷ ${fmtMoney(evm.ac)}</kbd>
+        <dl>
+          <dt>BAC</dt><dd class="num">${fmtMoney(evm.bac)}</dd>
+          <dt>EAC</dt><dd>${evm.eac !== undefined ? `<span class="num">${fmtMoney(evm.eac)}</span>` : naTag('CPI not computable')}</dd>
+          <dt>ETC</dt><dd>${evm.etc !== undefined ? `<span class="num">${fmtMoney(evm.etc)}</span>` : naTag('CPI not computable')}</dd>
+          <dt>VAC</dt><dd>${evm.vac !== undefined ? `<span class="num">${fmtMoney(evm.vac)}</span>` : naTag('CPI not computable')}</dd>
+          <dt>TCPI</dt><dd>${evm.tcpi !== undefined ? `<span class="num">${evm.tcpi.toFixed(2)}</span>` : naTag('BAC = AC')}</dd>
+        </dl>`),
+      earned: () => openModal('% Earned', 'cost-weighted, at the data date', `
+        <kbd class="formula">Σ(activity cost × earned %) ÷ Σ(activity cost), earned % from phys_complete_pct (÷100) or schedule-elapsed, 0 for unstarted work</kbd>
+        <dl><dt>EV</dt><dd class="num">${fmtMoney(evm.ev)}</dd><dt>BAC</dt><dd class="num">${fmtMoney(evm.bac)}</dd></dl>`),
+      crit: () => openModal('Critical activities', 'total float ≤ 0, not complete', critical.length
+        ? `<ul class="offender-list">${critical.map((t) => `<li>${esc(t.code)}</li>`).join('')}</ul>`
+        : '<p>No activities with float ≤ 0.</p>'),
+      dcma: () => openModal('DCMA 14-Point Assessment', `${dcmaPass} pass of ${14 - dcmaNA} computable`, `
+        <div class="tablewrap"><table class="ledger"><tbody>
+          ${dcma.map((c) => `<tr><td class="num">${c.id}</td><td>${esc(c.name)}</td><td>${statusPill(c.status)}</td></tr>`).join('')}
+        </tbody></table></div>
+        <p style="color:var(--dim);font-size:12.5px;margin-top:10px">Full detail on the Health view.</p>`),
+    };
+    el.querySelectorAll('[data-stat]').forEach((b) =>
+      b.addEventListener('click', () => statModals[b.dataset.stat]?.()));
+
+    el.querySelectorAll('[data-table]').forEach((tr) => {
+      const open = () => {
+        const name = tr.dataset.table;
+        const rows = m.raw[name] || [];
+        const fields = Object.keys(rows[0] || {});
+        openModal(`%T ${name}`, `${rows.length} rows`, `
+          <dl><dt>Fields</dt><dd class="num" style="font-size:12px">${esc(fields.join(', ') || '—')}</dd></dl>
+          ${rows.length ? `<kbd class="formula">first row: ${esc(JSON.stringify(rows[0]).slice(0, 420))}${JSON.stringify(rows[0]).length > 420 ? '…' : ''}</kbd>` : ''}`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+  },
+};
+
+
+// ---- src/views/wbs.js ----
+// WBS — tree list with cost-weighted rollup. Click opens a modal; scope only
+// changes via the modal's explicit "Set as scope" button, never a bare click.
+
+
+const ViewWBS = {
+  id: 'wbs', title: 'WBS', group: 'Overview',
+  chip(store) {
+    if (!store.scope) return '';
+    const n = store.model.wbsById.get(store.scope);
+    return n ? `scope: ${esc(n.shortName || n.name)}` : '';
+  },
+  render(el, store) {
+    const m = store.model;
+    const { stats } = store.d.rollup;
+    const rows = [];
+    const walk = (node, depth) => {
+      rows.push({ node, depth, s: stats.get(node.id) });
+      for (const c of node.children) walk(c, depth + 1);
+    };
+    walk(m.wbsRoot, 0);
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Work breakdown</h2>
+        <p class="sub">Cost-weighted % complete at the data date — Σ(cost × earned) ÷ Σ(cost) per subtree. Click a node for detail.</p>
+        <div>
+          ${rows.map(({ node, depth, s }) => `
+            <button class="wbsrow" data-wbs="${esc(node.id)}" style="padding-left:${10 + depth * 22}px">
+              <span class="name"><small>${esc(node.shortName)}</small>${esc(node.name)}</span>
+              <span class="cnt">${s.taskCount} act</span>
+              <span class="pctbar"><span class="bar"><i class="${store.scope === node.id ? 'brass' : ''}" style="width:${s.pct !== undefined ? (s.pct * 100).toFixed(1) : 0}%"></i></span></span>
+              <span class="pct">${s.pct !== undefined ? (s.pct * 100).toFixed(1) + '%' : '—'}</span>
+            </button>`).join('')}
+        </div>
+      </div>`;
+
+    el.querySelectorAll('[data-wbs]').forEach((btn) => btn.addEventListener('click', () => {
+      const node = m.wbsById.get(btn.dataset.wbs);
+      const s = stats.get(node.id);
+      const card = openModal(node.name, `WBS ${node.shortName || node.id}`, `
+        <dl>
+          <dt>% complete</dt><dd>${s.pct !== undefined ? `<span class="num">${fmtPct(s.pct)}</span> (cost-weighted)` : naTag('no cost assigned in subtree')}</dd>
+          <dt>Budget</dt><dd class="num">${fmtMoney(s.cost)}</dd>
+          <dt>Earned</dt><dd class="num">${fmtMoney(s.earned)}</dd>
+          <dt>Actual cost</dt><dd class="num">${fmtMoney(s.actual)}</dd>
+          <dt>Activities</dt><dd class="num">${s.taskCount} (${s.done} done · ${s.active} active · ${s.notStarted} not started)</dd>
+          <dt>Critical</dt><dd class="num">${s.critical}</dd>
+        </dl>`,
+        `<button class="btn small" data-clear-scope ${store.scope ? '' : 'disabled'}>Clear scope</button>
+         <button class="btn small primary" data-set-scope>Set as scope</button>`);
+      card.querySelector('[data-set-scope]').addEventListener('click', () => {
+        store.set({ scope: node.id }); closeModal();
+      });
+      card.querySelector('[data-clear-scope]')?.addEventListener('click', () => {
+        store.set({ scope: null }); closeModal();
+      });
+    }));
+  },
+};
+
+
+// ---- src/views/health.js ----
+// Health — the DCMA 14-Point Assessment, named as such. Each check opens a
+// modal with formula, threshold, measured value and offenders (or the honest
+// reason it isn't computable).
+
+
+function dcmaValueText(c) {
+  if (c.value === null || c.value === undefined) return '—';
+  if (c.id === 7 || c.id === 9) return String(c.count);
+  if (c.id === 13 || c.id === 14 || c.id === 12) return c.value.toFixed(2);
+  return fmtPct(c.value);
+}
+
+const ViewHealth = {
+  id: 'health', title: 'Schedule Health', group: 'Overview',
+  chip(store) {
+    const d = store.d.dcma;
+    return `<span class="num">${d.filter((c) => c.status === 'pass').length}</span> pass · <span class="num">${d.filter((c) => c.status === 'fail').length}</span> fail`;
+  },
+  render(el, store) {
+    const checks = store.d.dcma;
+    el.innerHTML = `
+      <div class="section">
+        <h2>DCMA 14-Point Assessment</h2>
+        <p class="sub">The standard PMO schedule-quality rubric, computed from this file${store.baseline ? ' and the loaded baseline' : ''}. Checks that need data this file doesn't carry say so — nothing is defaulted.</p>
+        <div class="tablewrap"><table class="ledger">
+          <thead><tr><th class="num">#</th><th>Check</th><th class="num">Value</th><th>Threshold</th><th>Status</th></tr></thead>
+          <tbody>
+            ${checks.map((c) => `<tr class="rowlink" data-check="${c.id}" tabindex="0">
+              <td class="num">${c.id}</td>
+              <td>${esc(c.name)}${c.status === 'na' ? ` <span style="color:var(--dim-2);font-size:11.5px">· ${esc(c.reason)}</span>` : ''}</td>
+              <td class="num">${dcmaValueText(c)}</td>
+              <td style="color:var(--dim)">${esc(c.threshold)}</td>
+              <td>${statusPill(c.status)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>
+      </div>`;
+
+    el.querySelectorAll('[data-check]').forEach((tr) => {
+      const open = () => {
+        const c = checks.find((x) => x.id === +tr.dataset.check);
+        openModal(`${c.id}. ${c.name}`, `threshold: ${c.threshold}`, `
+          <kbd class="formula">${esc(c.formula)}</kbd>
+          <dl>
+            <dt>Status</dt><dd>${statusPill(c.status)}</dd>
+            <dt>Measured</dt><dd class="num">${dcmaValueText(c)}${c.count !== undefined && c.total !== undefined ? ` &nbsp;(${c.count} of ${c.total})` : ''}</dd>
+            ${c.reason ? `<dt>Note</dt><dd>${esc(c.reason)}</dd>` : ''}
+          </dl>
+          ${c.offenders && c.offenders.length ? `<h4 style="margin:10px 0 0;font-size:12px;color:var(--dim-2);text-transform:uppercase;letter-spacing:.08em">Offending items</h4>${offenderListHTML(c.offenders, store.model)}` : ''}`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+  },
+};
+
+
+// ---- src/views/gantt.js ----
+// Gantt — WBS-reach task cards; expanding a card opens the detail modal with
+// a canvas mini-Gantt. Critical work is drawn as a dashed outline (same hue,
+// not a new color). Every canvas ships a hidden table for screen readers.
+
+
+
+
+function subtreeTasks(node) {
+  const out = [...node.tasks];
+  for (const c of node.children) out.push(...subtreeTasks(c));
+  return out;
+}
+
+function drawMiniGantt(ctx, w, h, tasks, model) {
+  const pad = { l: 74, r: 12, t: 8, b: 22 };
+  const t0 = Math.min(...tasks.map((t) => t.targetStart ?? Infinity));
+  const t1 = Math.max(...tasks.map((t) => t.targetEnd ?? 0));
+  if (!Number.isFinite(t0) || t1 <= t0) return;
+  const x = (ms) => pad.l + ((ms - t0) / (t1 - t0)) * (w - pad.l - pad.r);
+  const rowH = (h - pad.t - pad.b) / tasks.length;
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+  // month grid
+  ctx.strokeStyle = css('--border-soft'); ctx.fillStyle = css('--dim-2');
+  ctx.font = '10px ' + css('--mono'); ctx.lineWidth = 1;
+  const d0 = new Date(dayFloor(t0));
+  let g = Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth() + 1, 1);
+  while (g < t1) {
+    const gx = Math.round(x(g)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(gx, pad.t); ctx.lineTo(gx, h - pad.b); ctx.stroke();
+    const gd = new Date(g);
+    ctx.fillText(`${String(gd.getUTCMonth() + 1).padStart(2, '0')}/${String(gd.getUTCFullYear()).slice(2)}`, gx + 3, h - 8);
+    g = Date.UTC(gd.getUTCFullYear(), gd.getUTCMonth() + 3, 1);
+  }
+
+  tasks.forEach((t, i) => {
+    const y = pad.t + i * rowH;
+    const bh = Math.max(Math.min(rowH - 6, 12), 4);
+    const by = y + (rowH - bh) / 2;
+    ctx.fillStyle = css('--dim-2');
+    ctx.font = '10px ' + css('--mono');
+    ctx.fillText(t.code.slice(0, 9), 2, by + bh - 1);
+    if (t.targetStart === undefined || t.targetEnd === undefined) return;
+    const bx = x(t.targetStart);
+    const bw = Math.max(x(t.targetEnd) - bx, 2);
+    const crit = t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete';
+    if (t.milestone) {
+      ctx.fillStyle = crit ? css('--bad') : css('--trace');
+      const cx = bx, cy = by + bh / 2, s2 = bh / 2 + 1;
+      ctx.beginPath(); ctx.moveTo(cx, cy - s2); ctx.lineTo(cx + s2, cy); ctx.lineTo(cx, cy + s2); ctx.lineTo(cx - s2, cy); ctx.closePath(); ctx.fill();
+      return;
+    }
+    ctx.fillStyle = css('--raised-2');
+    ctx.fillRect(bx, by, bw, bh);
+    const earned = computeEarnedPct(t, model.dataDate);
+    if (earned > 0) { ctx.fillStyle = css('--trace'); ctx.fillRect(bx, by, bw * earned, bh); }
+    ctx.strokeStyle = crit ? css('--bad') : css('--border');
+    ctx.setLineDash(crit ? [4, 3] : []);
+    ctx.lineWidth = crit ? 1.5 : 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+    ctx.setLineDash([]);
+  });
+
+  // data date line
+  if (model.dataDate !== undefined && model.dataDate > t0 && model.dataDate < t1) {
+    const dx = Math.round(x(model.dataDate)) + 0.5;
+    ctx.strokeStyle = css('--dim'); ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(dx, pad.t); ctx.lineTo(dx, h - pad.b); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = css('--dim');
+    ctx.fillText('DD', dx - 7, pad.t + 8);
+  }
+}
+
+const ViewGantt = {
+  id: 'gantt', title: 'Gantt', group: 'Schedule',
+  chip(store) {
+    if (!store.scope) return '';
+    const n = store.model.wbsById.get(store.scope);
+    return n ? `scope: ${esc(n.shortName || n.name)}` : '';
+  },
+  render(el, store) {
+    const m = store.model;
+    const scopeNode = (store.scope && m.wbsById.get(store.scope)) || m.wbsRoot;
+    let nodes = scopeNode.children.length ? scopeNode.children : [scopeNode];
+    // flatten one more level where a child is only a container
+    nodes = nodes.flatMap((n) => (n.tasks.length === 0 && n.children.length ? n.children : [n]));
+
+    const { stats } = store.d.rollup;
+    el.innerHTML = `
+      <div class="section">
+        <h2>Gantt — ${esc(scopeNode.name)}</h2>
+        <p class="sub">One card per WBS reach. Open a card for its mini-Gantt; dashed outline marks critical work. Set scope from the WBS view.</p>
+        <div class="cardgrid">
+          ${nodes.map((n) => {
+            const s = stats.get(n.id);
+            if (!s || s.taskCount === 0) return '';
+            return `<button class="card taskcard" data-node="${esc(n.id)}">
+              <div style="display:flex;gap:12px;align-items:center">
+                ${ringSVG(s.pct, 'var(--trace)')}
+                <div style="min-width:0">
+                  <h4>${esc(n.name)}</h4>
+                  <div class="meta"><span class="num">${s.taskCount}</span> activities · <span class="num">${s.pct !== undefined ? fmtPct(s.pct) : '—'}</span> earned</div>
+                  <div class="meta" style="margin-top:4px">${s.critical ? `<span class="badge-crit">${s.critical} critical</span>` : '<span style="color:var(--dim-2)">no critical work</span>'}</div>
+                </div>
+              </div>
+            </button>`;
+          }).join('')}
+        </div>
+      </div>`;
+
+    el.querySelectorAll('[data-node]').forEach((btn) => btn.addEventListener('click', () => {
+      const node = m.wbsById.get(btn.dataset.node);
+      const tasks = subtreeTasks(node)
+        .filter((t) => t.targetStart !== undefined)
+        .sort((a, b) => a.targetStart - b.targetStart || a.targetEnd - b.targetEnd);
+      const height = Math.min(Math.max(tasks.length * 20 + 34, 90), 460);
+      const card = openModal(node.name, `${tasks.length} activities — planned bars, earned fill, dashed = critical`, `
+        <div class="chartbox"><canvas></canvas></div>
+        <div class="legend">
+          <span><i style="background:var(--raised-2);border:1px solid var(--border);height:8px"></i>planned</span>
+          <span><i style="background:var(--trace);height:8px"></i>earned</span>
+          <span><i style="background:none;border:1.5px dashed var(--bad);height:8px"></i>critical</span>
+        </div>
+        ${a11yTable(`Schedule bars for ${node.name}`,
+          ['Code', 'Activity', 'Planned start', 'Planned finish', 'Status', 'Critical'],
+          tasks.map((t) => [t.code, t.name, fmtDate(t.targetStart), fmtDate(t.targetEnd), t.status,
+            t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete' ? 'yes' : 'no']))}
+        <div class="tablewrap" style="margin-top:10px"><table class="ledger"><tbody>
+          ${tasks.map((t) => `<tr class="rowlink" data-task="${esc(t.id)}" tabindex="0"><td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td><td class="num">${fmtDate(t.targetEnd)}</td></tr>`).join('')}
+        </tbody></table></div>`);
+      mountCanvas(card.querySelector('canvas'), height, (ctx, w, h) => drawMiniGantt(ctx, w, h, tasks, m));
+      card.querySelectorAll('[data-task]').forEach((tr) => tr.addEventListener('click', () => {
+        const t = m.taskById.get(tr.dataset.task);
+        openModal(`${t.code} — ${t.name}`, esc(node.name), taskModalBody(t, m));
+      }));
+    }));
+  },
+};
+
+
+// ---- src/views/chainage.js ----
+// Chainage / Out-of-sequence — a reviewable repair queue, never auto-fixed.
+
+
+const ViewChainage = {
+  id: 'chainage', title: 'Chainage / OOS', group: 'Schedule',
+  chip(store) {
+    const withKp = store.model.tasks.filter((t) => t.chainage !== null);
+    if (!withKp.length) return '';
+    const kps = withKp.map((t) => t.chainage);
+    return `KP <span class="num">${Math.min(...kps).toFixed(1)}–${Math.max(...kps).toFixed(1)}</span>`;
+  },
+  render(el, store) {
+    const m = store.model;
+    const oos = store.d.oos;
+    const withKp = m.tasks.filter((t) => t.chainage !== null);
+    const kps = withKp.map((t) => t.chainage);
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Chainage coverage</h2>
+        <p class="sub">KP values extracted from activity codes/names (pattern <span class="num">KP###+###</span>). Activities with no match carry no chainage — never a fabricated 0.</p>
+        <div class="statrow">
+          ${statTile({ id: 'with', label: 'With chainage', value: `<span class="num">${withKp.length}</span>`, note: `of ${m.tasks.length} activities` })}
+          ${statTile({ id: 'range', label: 'KP range', value: withKp.length ? `<span class="num">${Math.min(...kps).toFixed(1)}–${Math.max(...kps).toFixed(1)}</span>` : naTag('no KP patterns found'), note: 'kilometre points' })}
+          ${statTile({ id: 'oos', label: 'Out of sequence', value: `<span class="num">${oos.length}</span>`, tone: oos.length ? 'warn' : 'good', note: 'succ. behind pred.' })}
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Repair queue</h2>
+        <p class="sub">Relationships whose successor sits behind its predecessor along the alignment (assumes works advance in increasing-KP direction). Review each — nothing is auto-corrected.</p>
+        ${oos.length === 0 ? '<div class="empty"><h3>Queue is clear</h3><p>No chainage-reversed relationships found.</p></div>'
+        : `<div class="tablewrap"><table class="ledger">
+            <thead><tr><th>Predecessor</th><th class="num">KP</th><th>Successor</th><th class="num">KP</th><th class="num">Reversal</th></tr></thead>
+            <tbody>${oos.map((o, i) => `<tr class="rowlink" data-oos="${i}" tabindex="0">
+              <td class="num">${esc(o.pred.code)}</td><td class="num">${o.predKp.toFixed(3)}</td>
+              <td class="num">${esc(o.succ.code)}</td><td class="num">${o.succKp.toFixed(3)}</td>
+              <td class="num" style="color:var(--warn)">−${o.deltaKm.toFixed(3)} km</td>
+            </tr>`).join('')}</tbody>
+          </table></div>`}
+      </div>`;
+
+    el.querySelectorAll('[data-oos]').forEach((tr) => {
+      const open = () => {
+        const o = oos[+tr.dataset.oos];
+        openModal('Out-of-sequence pair', `${o.pred.code} → ${o.succ.code} (${o.rel.type})`, `
+          <dl>
+            <dt>Predecessor</dt><dd><span class="num">${esc(o.pred.code)}</span> ${esc(o.pred.name)} — KP <span class="num">${o.predKp.toFixed(3)}</span></dd>
+            <dt>Successor</dt><dd><span class="num">${esc(o.succ.code)}</span> ${esc(o.succ.name)} — KP <span class="num">${o.succKp.toFixed(3)}</span></dd>
+            <dt>Reversal</dt><dd class="num">${o.deltaKm.toFixed(3)} km against the direction of works</dd>
+          </dl>
+          <p><b>Suggested review:</b> confirm whether this tie is a genuine constraint (e.g. a tie-in or shared crew returning up-station) or a modelling slip. If it is a slip, re-point the relationship at the activity covering the correct reach. This tool flags; the planner decides.</p>`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+  },
+};
+
+
+// ---- src/views/scurve.js ----
+// S-Curve — period PV bars + cumulative PV line (the one brass line), with
+// EV and AC as exactly one point each at the data date. A single XER file has
+// no history of actuals; drawing one would be fabrication, so this view never
+// does. Baseline cumulative (when loaded) renders in the slate trace color.
+
+
+
+
+const ViewSCurve = {
+  id: 'scurve', title: 'S-Curve', group: 'Cost & Resources',
+  chip(store) {
+    const e = store.d.evm;
+    return `BAC <span class="num">${esc(fmtMoney(e.bac))}</span>`;
+  },
+  render(el, store) {
+    const m = store.model;
+    const evm = store.d.evm;
+    const baseEvm = store.baseline ? computeEVM(store.baseline) : null;
+
+    const ring = (label, v, fmt, color, note) => `
+      <div class="ring">${ringSVG(v === null || v === undefined ? 0 : Math.min(v, 1), color)}
+        <div><div class="rv">${v === null || v === undefined ? '—' : fmt(v)}</div><div class="rl">${label}</div>
+        ${note ? `<div style="font-size:11px;color:var(--dim-2)">${note}</div>` : ''}</div>
+      </div>`;
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Cost curve</h2>
+        <p class="sub">Monthly planned value with the cumulative plan line. EV and AC are single marks at the data date — the file carries one snapshot of actuals, not a history, so no actual curve is drawn.</p>
+        <div class="ringrow">
+          ${ring('SPI', evm.spi.value, (v) => v.toFixed(2), evm.spi.value >= 0.95 ? 'var(--good)' : evm.spi.value >= 0.85 ? 'var(--warn)' : 'var(--bad)', evm.spi.value === null ? esc(evm.spi.reason) : '')}
+          ${ring('CPI', evm.cpi.value, (v) => v.toFixed(2), evm.cpi.value >= 0.95 ? 'var(--good)' : evm.cpi.value >= 0.85 ? 'var(--warn)' : 'var(--bad)', evm.cpi.value === null ? esc(evm.cpi.reason) : '')}
+          ${ring('% earned', evm.earnedPct, (v) => fmtPct(v), 'var(--trace)')}
+        </div>
+        <div class="chartbox"><canvas></canvas></div>
+        <div class="legend">
+          <span><i style="background:var(--raised-2);border:1px solid var(--border);height:8px"></i>PV per month</span>
+          <span><i style="background:var(--accent)"></i>cumulative PV</span>
+          ${baseEvm ? '<span><i style="background:var(--trace)"></i>baseline cumulative PV</span>' : ''}
+          <span><i class="dot" style="background:var(--good)"></i>EV at data date</span>
+          <span><i class="dot" style="background:var(--bad)"></i>AC at data date</span>
+        </div>
+        ${a11yTable('Planned value by month', ['Month', 'PV', 'Cumulative PV'],
+          evm.pv.map((p) => [p.key, Math.round(p.planned), Math.round(p.cum)]))}
+        <p class="visually-hidden">EV at data date: ${Math.round(evm.ev)}. AC at data date: ${Math.round(evm.ac)}.</p>
+      </div>
+
+      <div class="section">
+        <h2>Forecast</h2>
+        <div class="statrow">
+          <button class="stat" data-kpi="bac"><div class="label">BAC</div><div class="value">${esc(fmtMoney(evm.bac))}</div></button>
+          <button class="stat" data-kpi="eac"><div class="label">EAC</div><div class="value ${evm.eac > evm.bac ? 'bad' : ''}">${evm.eac !== undefined ? esc(fmtMoney(evm.eac)) : ''}${evm.eac === undefined ? naTag('CPI not computable') : ''}</div></button>
+          <button class="stat" data-kpi="etc"><div class="label">ETC</div><div class="value">${evm.etc !== undefined ? esc(fmtMoney(evm.etc)) : ''}${evm.etc === undefined ? naTag('CPI not computable') : ''}</div></button>
+          <button class="stat" data-kpi="vac"><div class="label">VAC</div><div class="value ${evm.vac < 0 ? 'bad' : 'good'}">${evm.vac !== undefined ? esc(fmtMoney(evm.vac)) : ''}${evm.vac === undefined ? naTag('CPI not computable') : ''}</div></button>
+          <button class="stat" data-kpi="tcpi"><div class="label">TCPI</div><div class="value">${evm.tcpi !== undefined ? `<span class="num">${evm.tcpi.toFixed(2)}</span>` : naTag('BAC = AC')}</div></button>
+        </div>
+      </div>`;
+
+    const canvas = el.querySelector('canvas');
+    const box = canvas.parentElement;
+    const tip = chartTip(box);
+    let geom = null;
+
+    mountCanvas(canvas, 300, (ctx, w, h) => {
+      const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+      const pad = { l: 58, r: 16, t: 12, b: 26 };
+      const pv = evm.pv;
+      if (!pv.length) return;
+      const maxCum = Math.max(evm.bac, baseEvm ? baseEvm.bac : 0) * 1.04;
+      const maxBar = Math.max(...pv.map((p) => p.planned)) * 1.15;
+      const X = (i) => pad.l + (i + 0.5) * ((w - pad.l - pad.r) / pv.length);
+      const bw = Math.max(((w - pad.l - pad.r) / pv.length) * 0.62, 2);
+      const Y = (v) => h - pad.b - (v / maxCum) * (h - pad.t - pad.b);
+      const Yb = (v) => h - pad.b - (v / maxBar) * (h - pad.t - pad.b) * 0.45;
+
+      // grid + axis labels (money on cumulative scale)
+      ctx.font = '10px ' + css('--mono');
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const v = (maxCum / 4) * i;
+        const y = Math.round(Y(v)) + 0.5;
+        ctx.strokeStyle = css('--border-soft');
+        ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+        ctx.fillStyle = css('--dim-2');
+        ctx.fillText(fmtMoney(v, ''), 6, y - 3);
+      }
+      // month labels: every ~3rd
+      pv.forEach((p, i) => {
+        if (i % Math.ceil(pv.length / 8) !== 0) return;
+        ctx.fillStyle = css('--dim-2');
+        ctx.fillText(p.key, X(i) - 18, h - 8);
+      });
+      // bars (period PV) — thin marks, 2px gap comes from bar width factor
+      pv.forEach((p, i) => {
+        ctx.fillStyle = css('--raised-2');
+        ctx.strokeStyle = css('--border');
+        const x0 = X(i) - bw / 2, y0 = Yb(p.planned);
+        ctx.fillRect(x0, y0, bw, h - pad.b - y0);
+        ctx.strokeRect(x0 + 0.5, y0 + 0.5, bw - 1, h - pad.b - y0 - 1);
+      });
+      // baseline cumulative (trace)
+      if (baseEvm && baseEvm.pv.length) {
+        ctx.strokeStyle = css('--trace'); ctx.lineWidth = 2; ctx.beginPath();
+        baseEvm.pv.forEach((p, i) => {
+          const px = pad.l + ((p.start - pv[0].start) / (periodStart(pv[pv.length - 1].key, 'month') - pv[0].start)) * (w - pad.l - pad.r - X(0) + pad.l);
+          const cx = Math.min(Math.max(px, pad.l), w - pad.r);
+          i === 0 ? ctx.moveTo(cx, Y(p.cum)) : ctx.lineTo(cx, Y(p.cum));
+        });
+        ctx.stroke();
+      }
+      // cumulative PV — the one brass line
+      ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2; ctx.beginPath();
+      pv.forEach((p, i) => (i === 0 ? ctx.moveTo(X(i), Y(p.cum)) : ctx.lineTo(X(i), Y(p.cum))));
+      ctx.stroke();
+
+      // data-date rule + EV/AC single points (with 2px surface ring)
+      if (evm.evPoint) {
+        const ddX = (() => {
+          const first = pv[0].start, last = periodStart(pv[pv.length - 1].key, 'month');
+          const f = (evm.evPoint.date - first) / (last - first);
+          return pad.l + Math.min(Math.max(f, 0), 1) * (w - pad.l - pad.r);
+        })();
+        ctx.strokeStyle = css('--dim'); ctx.setLineDash([3, 4]);
+        ctx.beginPath(); ctx.moveTo(ddX, pad.t); ctx.lineTo(ddX, h - pad.b); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = css('--dim');
+        ctx.fillText('data date', ddX + 4, pad.t + 9);
+        const pt = (v, color, label, dy) => {
+          ctx.beginPath(); ctx.arc(ddX, Y(v), 6, 0, Math.PI * 2);
+          ctx.fillStyle = css('--bg'); ctx.fill();
+          ctx.beginPath(); ctx.arc(ddX, Y(v), 4.5, 0, Math.PI * 2);
+          ctx.fillStyle = color; ctx.fill();
+          ctx.fillStyle = css('--text');
+          ctx.fillText(`${label} ${fmtMoney(v, '')}`, ddX + 9, Y(v) + dy);
+        };
+        pt(evm.ev, css('--good'), 'EV', 3);
+        pt(evm.ac, css('--bad'), 'AC', evm.ac > evm.ev - maxCum * 0.05 && evm.ac < evm.ev + maxCum * 0.05 ? 14 : 3);
+      }
+      geom = { pad, w, h, X, count: pv.length };
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (!geom) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const i = Math.min(Math.max(Math.round((mx - geom.pad.l) / ((geom.w - geom.pad.l - geom.pad.r) / geom.count) - 0.5), 0), geom.count - 1);
+      const p = evm.pv[i];
+      if (!p) { tip.hide(); return; }
+      tip.show(`${esc(p.key)}<br>PV <b>${esc(fmtMoney(p.planned))}</b><br>cum <b>${esc(fmtMoney(p.cum))}</b>`, mx, e.clientY - rect.top);
+    });
+    canvas.addEventListener('mouseleave', () => tip.hide());
+
+    const kpiModals = {
+      bac: ['Budget at Completion', 'Σ assigned cost across all activities', `<kbd class="formula">BAC = Σ TASKRSRC.target_cost = ${fmtMoney(evm.bac)}</kbd>`],
+      eac: ['Estimate at Completion', 'AC + (BAC − EV) ÷ CPI', `<kbd class="formula">EAC = ${fmtMoney(evm.ac)} + (${fmtMoney(evm.bac)} − ${fmtMoney(evm.ev)}) ÷ ${fmtRatio(evm.cpi.value) ?? 'N/A'} = ${evm.eac !== undefined ? fmtMoney(evm.eac) : 'N/A'}</kbd>`],
+      etc: ['Estimate to Complete', 'EAC − AC', `<kbd class="formula">ETC = ${evm.eac !== undefined ? `${fmtMoney(evm.eac)} − ${fmtMoney(evm.ac)} = ${fmtMoney(evm.etc)}` : 'N/A — CPI not computable'}</kbd>`],
+      vac: ['Variance at Completion', 'BAC − EAC', `<kbd class="formula">VAC = ${evm.vac !== undefined ? `${fmtMoney(evm.bac)} − ${fmtMoney(evm.eac)} = ${fmtMoney(evm.vac)}` : 'N/A — CPI not computable'}</kbd>`],
+      tcpi: ['To-Complete Performance Index', '(BAC − EV) ÷ (BAC − AC)', `<kbd class="formula">TCPI = (${fmtMoney(evm.bac)} − ${fmtMoney(evm.ev)}) ÷ (${fmtMoney(evm.bac)} − ${fmtMoney(evm.ac)}) = ${evm.tcpi !== undefined ? evm.tcpi.toFixed(2) : 'N/A'}</kbd><p>Efficiency required on all remaining work to land on BAC.</p>`],
+    };
+    el.querySelectorAll('[data-kpi]').forEach((b) => b.addEventListener('click', () => {
+      const [t, s, body] = kpiModals[b.dataset.kpi];
+      openModal(t, s, body);
+    }));
+  },
+};
+
+
+// ---- src/views/resource.js ----
+// Resource Histogram — weekly stacked bars by resource type; over-allocation
+// only where a RSRCRATE ceiling exists, with the honest "ceiling unavailable"
+// list for everything else.
+
+
+
+const RTYPE = [
+  ['RT_Labor', 'Labour', '--cat-labor'],
+  ['RT_Equip', 'Equipment', '--cat-equip'],
+  ['RT_Mat', 'Material', '--cat-mat'],
+];
+
+const ViewResource = {
+  id: 'resource', title: 'Resource Histogram', group: 'Cost & Resources',
+  chip(store) {
+    return `<span class="num">${store.model.rsrcById.size}</span> resources`;
+  },
+  render(el, store) {
+    const m = store.model;
+    const d = store.d.demand;
+    const keys = d.keys;
+    const series = RTYPE.filter(([type]) => d.byType.has(type));
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Weekly demand by resource type</h2>
+        <p class="sub">Assigned quantities spread across each activity's working-day span (via its calendar), bucketed by week.</p>
+        <div class="chartbox"><canvas></canvas></div>
+        <div class="legend">
+          ${series.map(([, label, cvar]) => `<span><i style="background:var(${cvar});height:8px"></i>${label}</span>`).join('')}
+        </div>
+        ${a11yTable('Weekly resource demand (quantity hours)', ['Week', ...series.map(([, l]) => l)],
+          keys.map((k) => [k, ...series.map(([type]) => Math.round(d.byType.get(type).get(k) || 0))]))}
+      </div>
+
+      <div class="section">
+        <h2>Over-allocation</h2>
+        <p class="sub">Computable only for resources with a <span class="num">RSRCRATE.max_qty_per_hr</span> ceiling. Flagged where a week's average demand clearly exceeds it (&gt;5% over).</p>
+        ${d.overalloc.length === 0 ? '<div class="empty"><h3>No breaches</h3><p>No ceilinged resource exceeds its limit in any week.</p></div>'
+        : `<div class="tablewrap"><table class="ledger">
+            <thead><tr><th>Resource</th><th class="num">Week of</th><th class="num">Avg demand /hr</th><th class="num">Ceiling /hr</th><th class="num">Load</th></tr></thead>
+            <tbody>${d.overalloc.map((o, i) => `<tr class="rowlink" data-oa="${i}" tabindex="0">
+              <td>${esc(o.rsrc.name)}</td>
+              <td class="num">${fmtDate(o.start)}</td>
+              <td class="num">${o.avgPerHr.toFixed(2)}</td>
+              <td class="num">${o.maxPerHr}</td>
+              <td class="num" style="color:${o.ratio > 1.5 ? 'var(--bad)' : 'var(--warn)'}">${Math.round(o.ratio * 100)}%</td>
+            </tr>`).join('')}</tbody>
+          </table></div>`}
+        ${d.noCeiling.length ? `<p class="sub" style="margin-top:12px">Ceiling unavailable (no RSRCRATE row) — over-allocation <b>not computable</b>, not assumed fine: ${d.noCeiling.map((r) => `<span class="num">${esc(r.name)}</span>`).join(', ')}.</p>` : ''}
+      </div>`;
+
+    const canvas = el.querySelector('canvas');
+    const tip = chartTip(canvas.parentElement);
+    let geom = null;
+
+    mountCanvas(canvas, 280, (ctx, w, h) => {
+      const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+      const pad = { l: 46, r: 10, t: 12, b: 26 };
+      if (!keys.length) return;
+      const totals = keys.map((k) => series.reduce((a, [type]) => a + (d.byType.get(type).get(k) || 0), 0));
+      const maxV = Math.max(...totals) * 1.1 || 1;
+      const step = (w - pad.l - pad.r) / keys.length;
+      const bw = Math.max(step - 2, 1); // 2px surface gap between adjacent bars
+      const Y = (v) => h - pad.b - (v / maxV) * (h - pad.t - pad.b);
+
+      ctx.font = '10px ' + css('--mono');
+      for (let i = 0; i <= 4; i++) {
+        const v = (maxV / 4) * i;
+        const y = Math.round(Y(v)) + 0.5;
+        ctx.strokeStyle = css('--border-soft');
+        ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+        ctx.fillStyle = css('--dim-2');
+        ctx.fillText(String(Math.round(v)), 6, y - 3);
+      }
+      keys.forEach((k, i) => {
+        let y0 = h - pad.b;
+        for (const [type, , cvar] of series) {
+          const v = d.byType.get(type).get(k) || 0;
+          if (v <= 0) continue;
+          const hh = (v / maxV) * (h - pad.t - pad.b);
+          ctx.fillStyle = css(cvar);
+          ctx.fillRect(pad.l + i * step + 1, y0 - hh, bw, Math.max(hh - 2, 1)); // 2px gap between stack segments
+          y0 -= hh;
+        }
+        if (i % Math.ceil(keys.length / 9) === 0) {
+          ctx.fillStyle = css('--dim-2');
+          ctx.fillText(k.slice(2), pad.l + i * step, h - 8);
+        }
+      });
+      geom = { pad, step };
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (!geom) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const i = Math.floor((mx - geom.pad.l) / geom.step);
+      const k = keys[i];
+      if (!k) { tip.hide(); return; }
+      tip.show(`week of ${esc(fmtDate(periodStart(k, 'week')))}<br>${series.map(([type, label]) =>
+        `${label} <b>${Math.round(d.byType.get(type).get(k) || 0)}</b>`).join('<br>')}`, mx, e.clientY - rect.top);
+    });
+    canvas.addEventListener('mouseleave', () => tip.hide());
+
+    el.querySelectorAll('[data-oa]').forEach((tr) => {
+      const open = () => {
+        const o = d.overalloc[+tr.dataset.oa];
+        const users = m.assignments
+          .filter((a) => a.rsrcId === o.rsrc.id)
+          .map((a) => m.taskById.get(a.taskId))
+          .filter((t) => t && t.targetStart !== undefined && t.targetEnd !== undefined
+            && t.targetStart <= o.start + 7 * 86400000 && t.targetEnd >= o.start);
+        openModal(`${o.rsrc.name} — week of ${fmtDate(o.start)}`, 'over-allocation detail', `
+          <dl>
+            <dt>Avg demand</dt><dd class="num">${o.avgPerHr.toFixed(2)} /hr</dd>
+            <dt>Ceiling</dt><dd class="num">${o.maxPerHr} /hr (RSRCRATE.max_qty_per_hr)</dd>
+            <dt>Load</dt><dd class="num">${Math.round(o.ratio * 100)}%</dd>
+          </dl>
+          <h4 style="margin:10px 0 4px;font-size:12px;color:var(--dim-2);text-transform:uppercase;letter-spacing:.08em">Activities drawing on it that week</h4>
+          <ul class="offender-list">${users.map((t) => `<li>${esc(t.code)} ${esc(t.name.slice(0, 40))}</li>`).join('') || '<li>—</li>'}</ul>
+          <p style="margin-top:10px"><b>Suggested review:</b> stagger the overlapping activities or add a second ${esc(o.rsrc.name)} spread — the schedule logic currently books both at once.</p>`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+  },
+};
+
+
+// ---- src/views/compare.js ----
+// Compare — three tabs over ONE shared compare.js output. Requires a second
+// file; without one the view says so honestly and offers to load it.
+
+
+
+const cmpSlip = (v) => v === undefined ? '—'
+  : v > 0 ? `<span style="color:var(--bad)">+${v} wd</span>`
+  : v < 0 ? `<span style="color:var(--good)">${v} wd</span>`
+  : '<span style="color:var(--dim-2)">0</span>';
+
+const ViewCompare = {
+  id: 'compare', title: 'Baseline Compare', group: 'Compare',
+  tab: 'activity',
+  chip(store) {
+    return store.baseline ? `vs <span class="num">${esc(store.baselineName)}</span>` : '';
+  },
+  render(el, store) {
+    if (!store.baseline) {
+      el.innerHTML = `
+        <div class="empty">
+          <h3>No baseline loaded</h3>
+          <p>Comparison needs a second .xer export. Activities are matched by <span class="num">task_code</span> — the stable key across P6 re-imports.</p>
+          <p style="margin-top:14px">
+            <button class="btn" data-load-baseline-file>Load baseline .xer…</button>
+            <button class="btn primary" data-load-demo-baseline>Use demo baseline</button>
+          </p>
+        </div>`;
+      el.querySelector('[data-load-demo-baseline]').addEventListener('click', () => store.useDemoBaseline());
+      el.querySelector('[data-load-baseline-file]').addEventListener('click', () => store.pickFile('baseline'));
+      return;
+    }
+
+    const m = store.model;
+    const cmp = store.d.cmp;
+    const tab = ViewCompare.tab;
+
+    const tabs = [['activity', 'Activity Variance'], ['wbs', 'WBS Variance'], ['crit', 'Critical Path Shift']];
+    let body = '';
+
+    if (tab === 'activity') {
+      const slipped = cmp.matched.filter((x) => x.slipDays !== undefined && x.slipDays !== 0);
+      body = `
+        <div class="statrow" style="margin-bottom:16px">
+          ${statTile({ id: 'matched', label: 'Matched', value: `<span class="num">${cmp.matched.length}</span>`, note: 'by task_code' })}
+          ${statTile({ id: 'added', label: 'Added', value: `<span class="num">${cmp.added.length}</span>`, note: 'in current only' })}
+          ${statTile({ id: 'removed', label: 'Removed', value: `<span class="num">${cmp.removed.length}</span>`, note: 'in baseline only' })}
+          ${statTile({ id: 'slipped', label: 'Slipped', value: `<span class="num">${slipped.filter((x) => x.slipDays > 0).length}</span>`, tone: 'warn', note: 'later than baseline' })}
+        </div>
+        <div class="tablewrap"><table class="ledger">
+          <thead><tr><th>Activity</th><th class="num">Baseline finish</th><th class="num">Current finish</th><th class="num">Slip</th></tr></thead>
+          <tbody>${cmp.matched.slice(0, 60).map((x) => `<tr class="rowlink" data-code="${esc(x.code)}" tabindex="0">
+            <td><span class="num">${esc(x.code)}</span> ${esc(x.cur.name.slice(0, 44))}</td>
+            <td class="num">${fmtDate(x.baseFinish)}</td>
+            <td class="num">${fmtDate(x.curFinish)}</td>
+            <td class="num">${cmpSlip(x.slipDays)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>`;
+    } else if (tab === 'wbs') {
+      body = `
+        <div class="tablewrap"><table class="ledger">
+          <thead><tr><th>WBS node</th><th class="num">Cost weight</th><th class="num">Cost-weighted slip</th><th>Worst activity</th></tr></thead>
+          <tbody>${cmp.wbsVariance.map((v, i) => `<tr class="rowlink" data-wv="${i}" tabindex="0">
+            <td>${esc(v.node ? v.node.name : '(unplaced)')}</td>
+            <td class="num">${esc(fmtMoney(v.cost))}</td>
+            <td class="num">${v.meanSlip !== undefined ? cmpSlip(+v.meanSlip.toFixed(1)) : naTag('no cost in subtree')}</td>
+            <td class="num">${v.worst ? `${esc(v.worst.code)} (${v.worst.slipDays} wd)` : '—'}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+        <p class="sub" style="margin-top:10px">Same cost-weighting rule as the WBS rollup: Σ(cost × slip) ÷ Σ(cost) over matched activities in the node.</p>`;
+    } else {
+      const list = (title, tasks, tone) => `
+        <div class="section">
+          <h2>${title} <span class="num" style="color:${tone}">${tasks.length}</span></h2>
+          ${tasks.length === 0 ? '<p class="sub">None.</p>' : `<div class="tablewrap"><table class="ledger"><tbody>
+            ${tasks.map((t) => `<tr class="rowlink" data-code="${esc(t.code)}" tabindex="0">
+              <td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td>
+              <td class="num">${t.floatDays !== undefined ? t.floatDays.toFixed(1) + ' wd float' : '—'}</td>
+            </tr>`).join('')}</tbody></table></div>`}
+        </div>`;
+      body = `
+        <p class="sub">Set difference of {total float ≤ 0, incomplete} between the two files (current ${cmp.curCritCount} vs baseline ${cmp.baseCritCount}) — deliberately not a re-derived CPM sequence diff.</p>
+        ${list('Newly critical', cmp.nowCritical, 'var(--bad)')}
+        ${list('No longer critical', cmp.leftCritical, 'var(--good)')}`;
+    }
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Baseline compare</h2>
+        <p class="sub"><b>${esc(store.modelName)}</b> vs baseline <b>${esc(store.baselineName)}</b> — one diff, three lenses.</p>
+        <div class="tabs">${tabs.map(([id, label]) => `<button class="tab ${tab === id ? 'active' : ''}" data-tab="${id}">${label}</button>`).join('')}</div>
+        ${body}
+      </div>`;
+
+    el.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
+      ViewCompare.tab = b.dataset.tab;
+      ViewCompare.render(el, store);
+    }));
+    el.querySelectorAll('[data-code]').forEach((tr) => {
+      const open = () => {
+        const match = cmp.matched.find((x) => x.code === tr.dataset.code);
+        const t = m.taskByCode.get(tr.dataset.code) || (match && match.cur);
+        if (!t) return;
+        const b = store.baseline.taskByCode.get(t.code);
+        openModal(`${t.code} — ${t.name}`, 'current vs baseline', `
+          ${taskModalBody(t, m)}
+          <h4 style="margin:6px 0 4px;font-size:12px;color:var(--dim-2);text-transform:uppercase;letter-spacing:.08em">Baseline</h4>
+          ${b ? `<dl><dt>Planned</dt><dd class="num">${fmtDate(b.targetStart)} → ${fmtDate(b.targetEnd)}</dd>
+          <dt>Slip</dt><dd class="num">${match && match.slipDays !== undefined ? cmpSlip(match.slipDays) : '—'}</dd></dl>` : naTag('not in baseline (added activity)')}`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+    el.querySelectorAll('[data-wv]').forEach((tr) => {
+      const open = () => {
+        const v = cmp.wbsVariance[+tr.dataset.wv];
+        openModal(v.node ? v.node.name : 'Unplaced activities', 'WBS variance detail', `
+          <dl>
+            <dt>Matched activities</dt><dd class="num">${v.count}</dd>
+            <dt>Cost weight</dt><dd class="num">${esc(fmtMoney(v.cost))}</dd>
+            <dt>Weighted slip</dt><dd>${v.meanSlip !== undefined ? cmpSlip(+v.meanSlip.toFixed(1)) : naTag('no cost in subtree — slip not weightable')}</dd>
+            <dt>Worst</dt><dd>${v.worst ? `<span class="num">${esc(v.worst.code)}</span> at +${v.worst.slipDays} wd` : '—'}</dd>
+          </dl>`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+  },
+};
+
+
+// ---- src/app.js ----
+// app.js — the Store (the only thing that calls parseXER/buildModel), the
+// shell (sidebar, header, drawer), and the hash router. Views subscribe to
+// the store's change event; no view imports another view's state.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const VIEWS = [ViewCommand, ViewWBS, ViewHealth, ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare];
+
+const store = {
+  model: null, modelName: '', baseline: null, baselineName: '',
+  scope: null, view: 'command',
+  d: {},
+  listeners: new Set(),
+  on(fn) { this.listeners.add(fn); },
+  emit() { for (const fn of this.listeners) fn(); },
+  set(patch) { Object.assign(this, patch); this.emit(); },
+
+  recompute() {
+    const m = this.model;
+    if (!m) { this.d = {}; return; }
+    this.d = {
+      evm: computeEVM(m),
+      dcma: runAllChecks(m, { baseline: this.baseline }),
+      rollup: rollupWBS(m),
+      oos: findOutOfSequence(m),
+      demand: resourceDemand(m, 'week'),
+      cmp: this.baseline ? compareModels(m, this.baseline) : null,
+    };
+  },
+
+  loadCurrent(text, name) {
+    this.model = buildModel(parseXER(text));
+    this.modelName = name;
+    this.scope = null;
+    this.recompute();
+    this.emit();
+  },
+  loadBaseline(text, name) {
+    this.baseline = buildModel(parseXER(text));
+    this.baselineName = name;
+    this.recompute();
+    this.emit();
+  },
+  useDemo() { this.loadCurrent(DEMO_XER, DEMO_NAME + ' (demo)'); },
+  useDemoBaseline() { this.loadBaseline(BASELINE_XER, BASELINE_NAME + ' (demo)'); },
+
+  pickFile(kind) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.xer,text/plain';
+    input.addEventListener('change', () => {
+      const f = input.files[0];
+      if (!f) return;
+      f.text().then((text) => {
+        try {
+          kind === 'baseline' ? this.loadBaseline(text, f.name) : this.loadCurrent(text, f.name);
+        } catch (err) {
+          alert(`Could not parse ${f.name}: ${err.message}`);
+        }
+      });
+    });
+    input.click();
+  },
+};
+
+function renderSidebar(shell) {
+  const groups = [];
+  for (const v of VIEWS) {
+    let g = groups.find((x) => x.name === v.group);
+    if (!g) { g = { name: v.group, views: [] }; groups.push(g); }
+    g.views.push(v);
+  }
+  const nav = shell.querySelector('.sidebar');
+  nav.innerHTML = `
+    <div class="brand"><i></i><b>PRISM</b><span>FIELD LEDGER</span></div>
+    ${groups.map((g) => `
+      <div class="navgroup">
+        <h3>${esc(g.name)}</h3>
+        <div class="navlist">
+          <span class="nav-indicator"></span>
+          ${g.views.map((v) => `<button class="navitem" data-view="${v.id}">${esc(v.title)}</button>`).join('')}
+        </div>
+      </div>`).join('')}`;
+  nav.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => {
+    location.hash = '#/' + b.dataset.view;
+    shell.classList.remove('drawer-open');
+  }));
+}
+
+function syncNav(shell) {
+  shell.querySelectorAll('.navlist').forEach((list) => {
+    const ind = list.querySelector('.nav-indicator');
+    const active = list.querySelector(`[data-view="${store.view}"]`);
+    list.querySelectorAll('.navitem').forEach((b) => b.classList.toggle('active', b.dataset.view === store.view));
+    if (active) {
+      ind.style.opacity = '1';
+      ind.style.top = active.offsetTop + 6 + 'px';
+      ind.style.height = active.offsetHeight - 12 + 'px';
+    } else {
+      ind.style.opacity = '0';
+    }
+  });
+}
+
+function renderHeader(shell) {
+  const view = VIEWS.find((v) => v.id === store.view) || VIEWS[0];
+  const chip = store.model && view.chip ? view.chip(store) : '';
+  shell.querySelector('.header').innerHTML = `
+    <button class="hamburger" aria-label="Menu"><i></i><i></i><i></i></button>
+    <div class="crumb">PRISM / ${esc(view.group)}<b>${esc(view.title)}</b></div>
+    ${chip ? `<span class="chip">${chip}</span>` : ''}
+    <span class="spacer"></span>
+    <button class="btn small" data-act="baseline">Load baseline…</button>
+    <button class="btn small primary" data-act="load">Load .xer…</button>`;
+  shell.querySelector('.hamburger').addEventListener('click', () => shell.classList.toggle('drawer-open'));
+  shell.querySelector('[data-act="load"]').addEventListener('click', () => store.pickFile('current'));
+  shell.querySelector('[data-act="baseline"]').addEventListener('click', () => store.pickFile('baseline'));
+}
+
+function renderView(shell) {
+  const el = shell.querySelector('.view');
+  const view = VIEWS.find((v) => v.id === store.view) || VIEWS[0];
+  el.classList.remove('view'); // retrigger settle animation
+  void el.offsetWidth;
+  el.classList.add('view');
+  if (!store.model) {
+    el.innerHTML = `<div class="empty" style="margin-top:40px">
+      <h3>No schedule loaded</h3>
+      <p>Load a Primavera P6 .xer export, or explore the bundled demo project.</p>
+      <p style="margin-top:14px"><button class="btn" data-open>Load .xer…</button>
+      <button class="btn primary" data-demo>Open demo project</button></p></div>`;
+    el.querySelector('[data-demo]').addEventListener('click', () => store.useDemo());
+    el.querySelector('[data-open]').addEventListener('click', () => store.pickFile('current'));
+    return;
+  }
+  view.render(el, store);
+}
+
+function boot(root = document.body) {
+  root.innerHTML = `
+    <div class="shell">
+      <button class="scrim" aria-label="Close menu" tabindex="-1"></button>
+      <nav class="sidebar" aria-label="Views"></nav>
+      <div class="main">
+        <header class="header"></header>
+        <main class="view"></main>
+      </div>
+    </div>`;
+  const shell = root.querySelector('.shell');
+  renderSidebar(shell);
+  shell.querySelector('.scrim').addEventListener('click', () => shell.classList.remove('drawer-open'));
+
+  const applyHash = () => {
+    const id = (location.hash || '').replace(/^#\//, '') || 'command';
+    if (VIEWS.some((v) => v.id === id)) store.view = id;
+    closeModal();
+    renderHeader(shell);
+    renderView(shell);
+    syncNav(shell);
+  };
+  window.addEventListener('hashchange', applyHash);
+  store.on(() => { renderHeader(shell); renderView(shell); syncNav(shell); });
+
+  store.useDemo(); // demo loads instantly; "Load .xer" replaces it
+  applyHash();
+}
+
+boot(document.getElementById('prism-root'));
+
+})();
+</script></body>
+</html>

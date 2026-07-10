@@ -1,0 +1,17 @@
+{
+  "name": "prism-field-ledger",
+  "version": "1.0.0",
+  "description": "PRISM — client-only Primavera P6 XER schedule/cost/constraint analytics (Field Ledger build)",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "fixtures": "node tools/make-fixture.js",
+    "build": "node tools/build.js",
+    "smoke": "node tools/smoke.js",
+    "serve": "python3 -m http.server 8080"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "playwright-core": "^1.61.1"
+  }
+}

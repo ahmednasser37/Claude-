@@ -1,0 +1,26 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unit tests (kernel, hand-derived expectations)
+        run: npm test
+      - name: Fixtures are reproducible
+        run: |
+          node tools/make-fixture.js
+          git diff --exit-code tests/fixtures src/data
+      - name: Bundle builds
+        run: node tools/build.js
+      - name: Browser smoke test (clicks, modals, mobile drawer)
+        run: |
+          npm i -D playwright-core
+          npx playwright-core install --with-deps chromium
+          CHROMIUM_PATH="$(node -e "console.log(require('playwright-core').chromium.executablePath())")" node tools/smoke.js

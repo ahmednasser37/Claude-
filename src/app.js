@@ -1,0 +1,185 @@
+// app.js — the Store (the only thing that calls parseXER/buildModel), the
+// shell (sidebar, header, drawer), and the hash router. Views subscribe to
+// the store's change event; no view imports another view's state.
+import { parseXER } from './kernel/xer-parser.js';
+import { buildModel } from './kernel/model.js';
+import { computeEVM } from './kernel/evm.js';
+import { runAllChecks } from './kernel/dcma.js';
+import { rollupWBS } from './kernel/wbs.js';
+import { findOutOfSequence } from './kernel/chainage.js';
+import { resourceDemand } from './kernel/resource.js';
+import { compareModels } from './kernel/compare.js';
+import { DEMO_XER, BASELINE_XER, DEMO_NAME, BASELINE_NAME } from './data/demo.js';
+import { closeModal } from './ui/modal.js';
+import { esc } from './ui/components.js';
+import { ViewCommand } from './views/command.js';
+import { ViewWBS } from './views/wbs.js';
+import { ViewHealth } from './views/health.js';
+import { ViewGantt } from './views/gantt.js';
+import { ViewChainage } from './views/chainage.js';
+import { ViewSCurve } from './views/scurve.js';
+import { ViewResource } from './views/resource.js';
+import { ViewCompare } from './views/compare.js';
+
+const VIEWS = [ViewCommand, ViewWBS, ViewHealth, ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare];
+
+export const store = {
+  model: null, modelName: '', baseline: null, baselineName: '',
+  scope: null, view: 'command',
+  d: {},
+  listeners: new Set(),
+  on(fn) { this.listeners.add(fn); },
+  emit() { for (const fn of this.listeners) fn(); },
+  set(patch) { Object.assign(this, patch); this.emit(); },
+
+  recompute() {
+    const m = this.model;
+    if (!m) { this.d = {}; return; }
+    this.d = {
+      evm: computeEVM(m),
+      dcma: runAllChecks(m, { baseline: this.baseline }),
+      rollup: rollupWBS(m),
+      oos: findOutOfSequence(m),
+      demand: resourceDemand(m, 'week'),
+      cmp: this.baseline ? compareModels(m, this.baseline) : null,
+    };
+  },
+
+  loadCurrent(text, name) {
+    this.model = buildModel(parseXER(text));
+    this.modelName = name;
+    this.scope = null;
+    this.recompute();
+    this.emit();
+  },
+  loadBaseline(text, name) {
+    this.baseline = buildModel(parseXER(text));
+    this.baselineName = name;
+    this.recompute();
+    this.emit();
+  },
+  useDemo() { this.loadCurrent(DEMO_XER, DEMO_NAME + ' (demo)'); },
+  useDemoBaseline() { this.loadBaseline(BASELINE_XER, BASELINE_NAME + ' (demo)'); },
+
+  pickFile(kind) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.xer,text/plain';
+    input.addEventListener('change', () => {
+      const f = input.files[0];
+      if (!f) return;
+      f.text().then((text) => {
+        try {
+          kind === 'baseline' ? this.loadBaseline(text, f.name) : this.loadCurrent(text, f.name);
+        } catch (err) {
+          alert(`Could not parse ${f.name}: ${err.message}`);
+        }
+      });
+    });
+    input.click();
+  },
+};
+
+function renderSidebar(shell) {
+  const groups = [];
+  for (const v of VIEWS) {
+    let g = groups.find((x) => x.name === v.group);
+    if (!g) { g = { name: v.group, views: [] }; groups.push(g); }
+    g.views.push(v);
+  }
+  const nav = shell.querySelector('.sidebar');
+  nav.innerHTML = `
+    <div class="brand"><i></i><b>PRISM</b><span>FIELD LEDGER</span></div>
+    ${groups.map((g) => `
+      <div class="navgroup">
+        <h3>${esc(g.name)}</h3>
+        <div class="navlist">
+          <span class="nav-indicator"></span>
+          ${g.views.map((v) => `<button class="navitem" data-view="${v.id}">${esc(v.title)}</button>`).join('')}
+        </div>
+      </div>`).join('')}`;
+  nav.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => {
+    location.hash = '#/' + b.dataset.view;
+    shell.classList.remove('drawer-open');
+  }));
+}
+
+function syncNav(shell) {
+  shell.querySelectorAll('.navlist').forEach((list) => {
+    const ind = list.querySelector('.nav-indicator');
+    const active = list.querySelector(`[data-view="${store.view}"]`);
+    list.querySelectorAll('.navitem').forEach((b) => b.classList.toggle('active', b.dataset.view === store.view));
+    if (active) {
+      ind.style.opacity = '1';
+      ind.style.top = active.offsetTop + 6 + 'px';
+      ind.style.height = active.offsetHeight - 12 + 'px';
+    } else {
+      ind.style.opacity = '0';
+    }
+  });
+}
+
+function renderHeader(shell) {
+  const view = VIEWS.find((v) => v.id === store.view) || VIEWS[0];
+  const chip = store.model && view.chip ? view.chip(store) : '';
+  shell.querySelector('.header').innerHTML = `
+    <button class="hamburger" aria-label="Menu"><i></i><i></i><i></i></button>
+    <div class="crumb">PRISM / ${esc(view.group)}<b>${esc(view.title)}</b></div>
+    ${chip ? `<span class="chip">${chip}</span>` : ''}
+    <span class="spacer"></span>
+    <button class="btn small" data-act="baseline">Load baseline…</button>
+    <button class="btn small primary" data-act="load">Load .xer…</button>`;
+  shell.querySelector('.hamburger').addEventListener('click', () => shell.classList.toggle('drawer-open'));
+  shell.querySelector('[data-act="load"]').addEventListener('click', () => store.pickFile('current'));
+  shell.querySelector('[data-act="baseline"]').addEventListener('click', () => store.pickFile('baseline'));
+}
+
+function renderView(shell) {
+  const el = shell.querySelector('.view');
+  const view = VIEWS.find((v) => v.id === store.view) || VIEWS[0];
+  el.classList.remove('view'); // retrigger settle animation
+  void el.offsetWidth;
+  el.classList.add('view');
+  if (!store.model) {
+    el.innerHTML = `<div class="empty" style="margin-top:40px">
+      <h3>No schedule loaded</h3>
+      <p>Load a Primavera P6 .xer export, or explore the bundled demo project.</p>
+      <p style="margin-top:14px"><button class="btn" data-open>Load .xer…</button>
+      <button class="btn primary" data-demo>Open demo project</button></p></div>`;
+    el.querySelector('[data-demo]').addEventListener('click', () => store.useDemo());
+    el.querySelector('[data-open]').addEventListener('click', () => store.pickFile('current'));
+    return;
+  }
+  view.render(el, store);
+}
+
+export function boot(root = document.body) {
+  root.innerHTML = `
+    <div class="shell">
+      <button class="scrim" aria-label="Close menu" tabindex="-1"></button>
+      <nav class="sidebar" aria-label="Views"></nav>
+      <div class="main">
+        <header class="header"></header>
+        <main class="view"></main>
+      </div>
+    </div>`;
+  const shell = root.querySelector('.shell');
+  renderSidebar(shell);
+  shell.querySelector('.scrim').addEventListener('click', () => shell.classList.remove('drawer-open'));
+
+  const applyHash = () => {
+    const id = (location.hash || '').replace(/^#\//, '') || 'command';
+    if (VIEWS.some((v) => v.id === id)) store.view = id;
+    closeModal();
+    renderHeader(shell);
+    renderView(shell);
+    syncNav(shell);
+  };
+  window.addEventListener('hashchange', applyHash);
+  store.on(() => { renderHeader(shell); renderView(shell); syncNav(shell); });
+
+  store.useDemo(); // demo loads instantly; "Load .xer" replaces it
+  applyHash();
+}
+
+boot();
