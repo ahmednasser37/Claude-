@@ -39,7 +39,7 @@ export const ViewSCurve = {
         <div class="chartbox"><canvas></canvas></div>
         <div class="legend">
           <span><i style="background:var(--raised-2);border:1px solid var(--border);height:8px"></i>PV per month</span>
-          <span><i style="background:var(--accent)"></i>cumulative PV</span>
+          <span><i style="background:var(--chart-line)"></i>cumulative PV</span>
           ${baseEvm ? '<span><i style="background:var(--trace)"></i>baseline cumulative PV</span>' : ''}
           <span><i class="dot" style="background:var(--good)"></i>EV at data date</span>
           <span><i class="dot" style="background:var(--bad)"></i>AC at data date</span>
@@ -112,8 +112,8 @@ export const ViewSCurve = {
         });
         ctx.stroke();
       }
-      // cumulative PV — the one brass line
-      ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2; ctx.beginPath();
+      // cumulative PV — the one signal line
+      ctx.strokeStyle = css('--chart-line'); ctx.lineWidth = 2; ctx.beginPath();
       pv.forEach((p, i) => (i === 0 ? ctx.moveTo(X(i), Y(p.cum)) : ctx.lineTo(X(i), Y(p.cum))));
       ctx.stroke();
 

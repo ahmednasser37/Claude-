@@ -80,6 +80,48 @@ export const store = {
   },
 };
 
+// The drifting star field behind everything — pure decoration, drawn once
+// (static) for reduced-motion users, and never load-bearing for layout.
+function mountStarfield(canvas) {
+  const ctx = canvas.getContext('2d');
+  let stars = [];
+  const seed = (w, h) => {
+    stars = [];
+    const n = Math.round((w * h) / 11000);
+    for (let i = 0; i < n; i++) {
+      stars.push({
+        x: Math.random() * w, y: Math.random() * h,
+        r: 0.3 + Math.random() * 1.1,
+        v: 0.008 + Math.random() * 0.03,       // drift px/frame (parallax by size)
+        p: Math.random() * Math.PI * 2,         // twinkle phase
+        hue: Math.random() < 0.12 ? '139,123,255' : Math.random() < 0.3 ? '110,231,226' : '223,231,242',
+      });
+    }
+  };
+  const size = () => {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = innerWidth * dpr; canvas.height = innerHeight * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    seed(innerWidth, innerHeight);
+  };
+  const still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let t = 0;
+  const frame = () => {
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    t += 0.016;
+    for (const s of stars) {
+      if (!still) { s.x -= s.v * s.r; if (s.x < -2) s.x = innerWidth + 2; }
+      const tw = still ? 0.75 : 0.55 + 0.45 * Math.sin(t * 0.8 + s.p);
+      ctx.fillStyle = `rgba(${s.hue},${(0.5 * tw * s.r).toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+    }
+    if (!still) requestAnimationFrame(frame);
+  };
+  size();
+  window.addEventListener('resize', size);
+  frame();
+}
+
 function renderSidebar(shell) {
   const groups = [];
   for (const v of VIEWS) {
@@ -89,7 +131,7 @@ function renderSidebar(shell) {
   }
   const nav = shell.querySelector('.sidebar');
   nav.innerHTML = `
-    <div class="brand"><i></i><b>PRISM</b><span>FIELD LEDGER</span></div>
+    <div class="brand"><i></i><b>PRISM</b><span>DEEP FIELD</span></div>
     ${groups.map((g) => `
       <div class="navgroup">
         <h3>${esc(g.name)}</h3>
@@ -155,6 +197,7 @@ function renderView(shell) {
 
 export function boot(root = document.body) {
   root.innerHTML = `
+    <canvas class="stars" aria-hidden="true"></canvas>
     <div class="shell">
       <button class="scrim" aria-label="Close menu" tabindex="-1"></button>
       <nav class="sidebar" aria-label="Views"></nav>
@@ -164,6 +207,7 @@ export function boot(root = document.body) {
       </div>
     </div>`;
   const shell = root.querySelector('.shell');
+  mountStarfield(root.querySelector('canvas.stars'));
   renderSidebar(shell);
   shell.querySelector('.scrim').addEventListener('click', () => shell.classList.remove('drawer-open'));
 

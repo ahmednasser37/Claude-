@@ -4,23 +4,26 @@
 <title>PRISM — Field Ledger</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-/* Field Ledger — ink-and-paper tones inverted for screen, one brass fitting. */
+/* DEEP FIELD — an off-world survey instrument. Void ground, drifting stars,
+   phosphor-cyan signal ink, one violet trace. The schedule read like telemetry
+   from orbit — not a SaaS dashboard. */
 :root {
-  --bg: #12141a;
-  --sidebar: #0e1015;
-  --raised: #191c23;
-  --raised-2: #1f232b;
-  --border: #2a2f39;
-  --border-soft: #21252d;
-  --text: #ece9e2;
-  --dim: #9ca0ab;
-  --dim-2: #5b606c;
-  --accent: #c9a24b;   /* scarce: active-nav mark, one chart line, one primary button */
-  --trace: #6c93b0;    /* secondary data series only */
-  --good: #6fbf8b;
-  --warn: #e0a458;
-  --bad: #e0645a;
-  /* validated categorical trio for the resource histogram (dark surface) */
+  --bg: #05060b;
+  --sidebar: rgba(4, 6, 12, .82);
+  --raised: rgba(16, 21, 34, .72);
+  --raised-2: rgba(20, 26, 42, .92);
+  --border: #223049;
+  --border-soft: #151c2d;
+  --text: #dfe7f2;
+  --dim: #8b97ad;
+  --dim-2: #4c5871;
+  --accent: #6ee7e2;        /* the signal: nav mark, needle, primary action */
+  --accent-glow: rgba(110, 231, 226, .32);
+  --chart-line: #26a5a1;    /* validated series step of the signal hue */
+  --trace: #8b7bff;         /* secondary data series only */
+  --good: #58d69a;
+  --warn: #e5a54e;
+  --bad: #ff6f66;
   --cat-labor: #3f83c9;
   --cat-equip: #bd7f33;
   --cat-mat: #9068d8;
@@ -32,52 +35,66 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
-  background: var(--bg);
+  background:
+    radial-gradient(1100px 700px at 78% -10%, rgba(139, 123, 255, .075), transparent 60%),
+    radial-gradient(900px 600px at -10% 110%, rgba(38, 165, 161, .06), transparent 60%),
+    var(--bg);
   color: var(--text);
   font: 14px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+canvas.stars {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  width: 100vw; height: 100vh;
 }
 button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; padding: 0; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 /* ---------- shell ---------- */
-.shell { display: flex; min-height: 100vh; }
+.shell { display: flex; min-height: 100vh; position: relative; z-index: 1; }
 .sidebar {
   width: 240px; flex: 0 0 240px;
   background: var(--sidebar);
+  backdrop-filter: blur(10px);
   border-right: 1px solid var(--border-soft);
   padding: 16px 12px 24px;
   position: sticky; top: 0; height: 100vh; overflow-y: auto;
 }
-.brand { display: flex; align-items: baseline; gap: 8px; padding: 4px 10px 18px; }
-.brand b { font-size: 15px; letter-spacing: .14em; }
-.brand span { font-size: 11px; color: var(--dim-2); letter-spacing: .06em; }
-.brand i { display: inline-block; width: 9px; height: 9px; border: 1.5px solid var(--accent); border-radius: 50%; transform: translateY(.5px); }
+.brand { display: flex; align-items: baseline; gap: 8px; padding: 4px 10px 20px; font-family: var(--mono); }
+.brand b { font-size: 15px; letter-spacing: .22em; color: var(--text); }
+.brand span { font-size: 9.5px; color: var(--dim-2); letter-spacing: .18em; }
+.brand i {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  border: 1.5px solid var(--accent); transform: translateY(.5px);
+  box-shadow: 0 0 8px var(--accent-glow);
+}
 
-.navgroup { margin: 14px 0 4px; }
+.navgroup { margin: 16px 0 4px; }
 .navgroup > h3 {
   margin: 0 0 4px; padding: 0 10px;
-  font-size: 10.5px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
-  color: var(--dim-2);
+  font-family: var(--mono); font-size: 9.5px; font-weight: 500;
+  letter-spacing: .22em; text-transform: uppercase; color: var(--dim-2);
 }
+.navgroup > h3::before { content: "// "; color: var(--dim-2); }
 .navlist { position: relative; }
 .nav-indicator {
-  position: absolute; left: 0; width: 3px; border-radius: 2px;
+  position: absolute; left: 0; width: 2px; border-radius: 2px;
   background: var(--accent);
+  box-shadow: 0 0 10px var(--accent-glow), 0 0 3px var(--accent);
   transition: top .22s cubic-bezier(.4,0,.2,1), height .22s cubic-bezier(.4,0,.2,1), opacity .2s;
   opacity: 0;
 }
 .navitem {
   display: flex; width: 100%; align-items: center; gap: 9px;
-  padding: 7px 10px 7px 14px; border-radius: 7px;
-  color: var(--dim); text-align: left; font-size: 13.5px;
+  padding: 7px 10px 7px 14px; border-radius: 6px;
+  color: var(--dim); text-align: left; font-size: 13px;
+  font-family: var(--mono); letter-spacing: .02em;
   transition: background .15s, color .15s;
 }
 .navitem:hover { background: var(--raised); color: var(--text); }
-.navitem.active { color: var(--text); background: var(--raised); }
-.navitem .k { margin-left: auto; font-size: 11px; color: var(--dim-2); }
-.navitem.active .k { color: var(--accent); }
+.navitem.active { color: var(--accent); background: var(--raised); text-shadow: 0 0 12px var(--accent-glow); }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .header {
@@ -85,38 +102,41 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   display: flex; align-items: center; gap: 14px;
   padding: 0 22px;
   border-bottom: 1px solid var(--border-soft);
-  position: sticky; top: 0; background: var(--bg); z-index: 30;
+  position: sticky; top: 0; z-index: 30;
+  background: rgba(5, 6, 11, .8); backdrop-filter: blur(10px);
 }
-.header .crumb { font-size: 12px; color: var(--dim-2); }
-.header .crumb b { color: var(--text); font-size: 14.5px; font-weight: 600; display: block; line-height: 1.15; }
+.header .crumb { font-family: var(--mono); font-size: 10.5px; color: var(--dim-2); letter-spacing: .14em; text-transform: uppercase; }
+.header .crumb b { color: var(--text); font-size: 13.5px; font-weight: 600; display: block; line-height: 1.2; letter-spacing: .06em; }
 .chip {
-  font-size: 11.5px; padding: 3px 10px; border: 1px solid var(--border);
-  border-radius: 999px; color: var(--dim); background: var(--raised);
-  white-space: nowrap;
+  font-family: var(--mono); font-size: 11px; padding: 3px 10px;
+  border: 1px solid var(--border); border-radius: 999px;
+  color: var(--dim); background: var(--raised); white-space: nowrap;
 }
-.chip .num { color: var(--text); }
+.chip .num { color: var(--accent); }
 .spacer { flex: 1; }
 .btn {
-  padding: 7px 14px; border-radius: 7px; font-size: 13px; font-weight: 550;
+  padding: 7px 14px; border-radius: 6px; font-size: 12.5px; font-weight: 550;
+  font-family: var(--mono); letter-spacing: .03em;
   border: 1px solid var(--border); background: var(--raised); color: var(--text);
-  transition: border-color .15s, background .15s;
-  white-space: nowrap;
+  transition: border-color .15s, box-shadow .15s; white-space: nowrap;
 }
-.btn:hover { border-color: var(--dim-2); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #16130a; font-weight: 650; }
-.btn.primary:hover { filter: brightness(1.07); }
-.btn.small { padding: 4px 10px; font-size: 12px; }
+.btn:hover { border-color: var(--accent); box-shadow: 0 0 14px rgba(110,231,226,.15); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #03110f; font-weight: 700; }
+.btn.primary:hover { box-shadow: 0 0 18px var(--accent-glow); }
+.btn.small { padding: 4px 10px; font-size: 11.5px; }
 .hamburger { display: none; }
 
-.view { padding: 22px; max-width: 1180px; width: 100%; margin: 0 auto; animation: settle .24s ease-out; }
-@keyframes settle { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.view { padding: 24px 22px; max-width: 1180px; width: 100%; margin: 0 auto; animation: settle .26s ease-out; }
+@keyframes settle { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
-/* ---------- density primitives: rows on the page, hairline dividers ---------- */
-.section { margin: 0 0 26px; }
+/* ---------- sections: instrument-log eyebrows ---------- */
+.section { margin: 0 0 30px; }
 .section > h2 {
-  margin: 0 0 2px; font-size: 15px; font-weight: 650; letter-spacing: .01em;
+  margin: 0 0 2px; font-family: var(--mono); font-size: 12px; font-weight: 600;
+  letter-spacing: .2em; text-transform: uppercase; color: var(--text);
 }
-.section > .sub { margin: 0 0 12px; font-size: 12.5px; color: var(--dim); }
+.section > h2::before { content: "⌖ "; color: var(--accent); text-shadow: 0 0 10px var(--accent-glow); }
+.section > .sub { margin: 0 0 14px; font-size: 12.5px; color: var(--dim); max-width: 72ch; }
 
 .statrow {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -128,15 +148,17 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .stat:last-child { border-right: none; }
 .stat:hover { background: var(--raised); }
-.stat .label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim-2); }
-.stat .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 24px; line-height: 1.3; }
-.stat .note { font-size: 11.5px; color: var(--dim); }
-.stat .value.good { color: var(--good); } .stat .value.warn { color: var(--warn); } .stat .value.bad { color: var(--bad); }
+.stat .label { font-family: var(--mono); font-size: 9.5px; letter-spacing: .2em; text-transform: uppercase; color: var(--dim-2); }
+.stat .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 25px; font-weight: 300; line-height: 1.35; }
+.stat .note { font-size: 11px; color: var(--dim); }
+.stat .value.good { color: var(--good); text-shadow: 0 0 14px rgba(88,214,154,.3); }
+.stat .value.warn { color: var(--warn); text-shadow: 0 0 14px rgba(229,165,78,.3); }
+.stat .value.bad  { color: var(--bad);  text-shadow: 0 0 14px rgba(255,111,102,.3); }
 
 table.ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.ledger th {
-  text-align: left; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
-  color: var(--dim-2); font-weight: 600; padding: 6px 10px;
+  text-align: left; font-family: var(--mono); font-size: 9.5px; letter-spacing: .18em;
+  text-transform: uppercase; color: var(--dim-2); font-weight: 600; padding: 6px 10px;
   border-bottom: 1px solid var(--border);
 }
 table.ledger td { padding: 8px 10px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
@@ -147,59 +169,77 @@ table.ledger tr.rowlink:hover { background: var(--raised); }
 
 .pill {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: 11px; font-weight: 650; letter-spacing: .05em;
+  font-family: var(--mono); font-size: 10px; font-weight: 650; letter-spacing: .12em;
   padding: 2px 9px; border-radius: 999px; text-transform: uppercase;
 }
-.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.pill.pass { color: var(--good); background: rgba(111,191,139,.12); }
-.pill.fail { color: var(--bad); background: rgba(224,100,90,.12); }
-.pill.warn { color: var(--warn); background: rgba(224,164,88,.12); }
-.pill.na   { color: var(--dim); background: rgba(155,160,171,.10); }
-.pill.info { color: var(--trace); background: rgba(108,147,176,.12); }
+.pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
+.pill.pass { color: var(--good); background: rgba(88,214,154,.1); }
+.pill.fail { color: var(--bad); background: rgba(255,111,102,.1); }
+.pill.warn { color: var(--warn); background: rgba(229,165,78,.1); }
+.pill.na   { color: var(--dim); background: rgba(139,151,173,.08); }
+.pill.info { color: var(--trace); background: rgba(139,123,255,.1); }
 
 .na-tag { font-size: 12px; color: var(--dim); border-bottom: 1px dotted var(--dim-2); cursor: help; }
 
-.bar { height: 4px; border-radius: 2px; background: var(--raised-2); overflow: hidden; }
-.bar > i { display: block; height: 100%; background: var(--trace); border-radius: 2px; }
-.bar > i.brass { background: var(--accent); }
+.bar { height: 3px; border-radius: 2px; background: var(--raised-2); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--chart-line); border-radius: 2px; box-shadow: 0 0 6px rgba(38,165,161,.6); }
+.bar > i.brass { background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
 
-/* ---------- cards: reserved for genuinely discrete units ---------- */
+/* ---------- cards ---------- */
 .card {
   border: 1px solid var(--border); border-radius: 10px; background: var(--raised);
-  padding: 14px 16px;
+  backdrop-filter: blur(6px); padding: 14px 16px; position: relative;
 }
+.card::before, .card::after {
+  content: ""; position: absolute; width: 10px; height: 10px; pointer-events: none;
+  border: 1px solid var(--dim-2);
+}
+.card::before { top: -1px; left: -1px; border-right: none; border-bottom: none; border-top-left-radius: 10px; }
+.card::after { bottom: -1px; right: -1px; border-left: none; border-top: none; border-bottom-right-radius: 10px; }
 .cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
-.taskcard { cursor: pointer; transition: border-color .15s; text-align: left; width: 100%; }
-.taskcard:hover { border-color: var(--dim-2); }
-.taskcard h4 { margin: 0; font-size: 13.5px; font-weight: 650; }
+.taskcard { cursor: pointer; transition: border-color .15s, box-shadow .15s; text-align: left; width: 100%; }
+.taskcard:hover { border-color: var(--accent); box-shadow: 0 0 20px rgba(110,231,226,.1); }
+.taskcard h4 { margin: 0; font-size: 13px; font-weight: 650; }
 .taskcard .meta { font-size: 11.5px; color: var(--dim); margin-top: 2px; }
 .badge-crit {
-  font-size: 10px; font-weight: 700; letter-spacing: .08em; color: var(--bad);
-  border: 1px dashed var(--bad); border-radius: 4px; padding: 1px 6px; text-transform: uppercase;
+  font-family: var(--mono); font-size: 9.5px; font-weight: 700; letter-spacing: .14em;
+  color: var(--bad); border: 1px dashed var(--bad); border-radius: 4px; padding: 1px 6px;
+  text-transform: uppercase; text-shadow: 0 0 8px rgba(255,111,102,.5);
 }
+
+/* ---------- observatory (Command) ---------- */
+.observatory { display: grid; grid-template-columns: minmax(300px, 460px) 1fr; gap: 26px; align-items: center; }
+.dialbox { position: relative; }
+.dialbox canvas { width: 100%; display: block; }
+.readouts { display: flex; flex-direction: column; }
+.readouts .statrow { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); border-top: none; }
+.readouts .statrow:first-child { border-top: 1px solid var(--border-soft); }
+@media (max-width: 980px) { .observatory { grid-template-columns: 1fr; } }
 
 /* ---------- modal ---------- */
 .modal-backdrop {
   position: fixed; inset: 0; z-index: 100;
-  background: rgba(6,7,10,.62); backdrop-filter: blur(2px);
+  background: rgba(2, 3, 7, .7); backdrop-filter: blur(3px);
   display: flex; align-items: center; justify-content: center; padding: 18px;
   animation: fadein .16s ease-out;
 }
 @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
 .modal-card {
-  background: var(--raised-2); border: 1px solid var(--border); border-radius: 12px;
-  width: min(620px, 100%); max-height: min(78vh, 720px);
+  background: var(--raised-2); backdrop-filter: blur(14px);
+  border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 0 60px rgba(110,231,226,.07), 0 24px 60px rgba(0,0,0,.5);
+  width: min(640px, 100%); max-height: min(78vh, 720px);
   display: flex; flex-direction: column;
   animation: settle .2s ease-out;
 }
 .modal-head { padding: 16px 20px 12px; border-bottom: 1px solid var(--border-soft); display: flex; gap: 12px; }
-.modal-head h3 { margin: 0; font-size: 15.5px; }
-.modal-head .sub { font-size: 12px; color: var(--dim); margin-top: 1px; }
+.modal-head h3 { margin: 0; font-size: 14px; font-family: var(--mono); letter-spacing: .04em; }
+.modal-head .sub { font-size: 12px; color: var(--dim); margin-top: 2px; }
 .modal-close { margin-left: auto; color: var(--dim-2); font-size: 20px; line-height: 1; align-self: flex-start; }
-.modal-close:hover { color: var(--text); }
+.modal-close:hover { color: var(--accent); }
 .modal-body { padding: 14px 20px; overflow-y: auto; font-size: 13.5px; }
 .modal-body dl { display: grid; grid-template-columns: minmax(110px, auto) 1fr; gap: 4px 16px; margin: 0 0 10px; }
-.modal-body dt { color: var(--dim-2); font-size: 12px; padding-top: 2px; }
+.modal-body dt { color: var(--dim-2); font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; padding-top: 3px; }
 .modal-body dd { margin: 0; }
 .modal-foot { padding: 12px 20px; border-top: 1px solid var(--border-soft); display: flex; gap: 10px; justify-content: flex-end; }
 
@@ -208,11 +248,13 @@ table.ledger tr.rowlink:hover { background: var(--raised); }
 .chartbox canvas { width: 100%; display: block; }
 .chart-tip {
   position: absolute; pointer-events: none; z-index: 20;
-  background: var(--raised-2); border: 1px solid var(--border); border-radius: 7px;
+  background: var(--raised-2); backdrop-filter: blur(8px);
+  border: 1px solid var(--border); border-radius: 7px;
   padding: 7px 10px; font-size: 12px; white-space: nowrap; display: none;
+  box-shadow: 0 8px 30px rgba(0,0,0,.5);
 }
 .chart-tip b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 600; }
-.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--dim); margin: 8px 2px 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-family: var(--mono); font-size: 11px; letter-spacing: .04em; color: var(--dim); margin: 10px 2px 0; }
 .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; transform: translateY(-2.5px); }
 .legend i.dot { width: 8px; height: 8px; border-radius: 50%; transform: translateY(-1px); }
 .visually-hidden {
@@ -220,17 +262,17 @@ table.ledger tr.rowlink:hover { background: var(--raised); }
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 
-.ringrow { display: flex; gap: 26px; flex-wrap: wrap; margin-bottom: 8px; }
+.ringrow { display: flex; gap: 26px; flex-wrap: wrap; margin-bottom: 10px; }
 .ring { display: flex; align-items: center; gap: 10px; }
 .ring svg { transform: rotate(-90deg); }
-.ring .rv { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 17px; line-height: 1.2; }
-.ring .rl { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim-2); }
+.ring .rv { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 17px; font-weight: 300; line-height: 1.2; }
+.ring .rl { font-family: var(--mono); font-size: 9.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--dim-2); }
 
 /* ---------- tabs ---------- */
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
-.tab { padding: 8px 14px; font-size: 13px; color: var(--dim); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab { padding: 8px 14px; font-family: var(--mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tab:hover { color: var(--text); }
-.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); text-shadow: 0 0 10px var(--accent-glow); }
 
 /* ---------- WBS tree ---------- */
 .wbsrow {
@@ -241,31 +283,32 @@ table.ledger tr.rowlink:hover { background: var(--raised); }
 .wbsrow:hover { background: var(--raised); }
 .wbsrow .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wbsrow .name small { color: var(--dim-2); margin-right: 8px; font-family: var(--mono); }
-.wbsrow .cnt { font-size: 11.5px; color: var(--dim-2); white-space: nowrap; }
+.wbsrow .cnt { font-family: var(--mono); font-size: 10.5px; color: var(--dim-2); white-space: nowrap; }
 .wbsrow .pctbar { width: 130px; flex: 0 0 130px; }
 .wbsrow .pct { width: 58px; text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
 
 .banner {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  font-size: 12.5px; color: var(--dim);
-  border: 1px dashed var(--border); border-radius: 9px;
-  padding: 9px 14px; margin-bottom: 20px;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 11.5px; color: var(--dim); letter-spacing: .02em;
+  border: 1px solid var(--border-soft); border-left: 2px solid var(--accent);
+  border-radius: 0 8px 8px 0; background: var(--raised);
+  padding: 9px 14px; margin-bottom: 22px;
 }
 .banner b { color: var(--text); font-weight: 600; }
 
 .empty {
-  border: 1px dashed var(--border); border-radius: 10px; padding: 34px 20px;
-  text-align: center; color: var(--dim);
+  border: 1px dashed var(--border); border-radius: 10px; padding: 38px 20px;
+  text-align: center; color: var(--dim); background: var(--raised);
 }
-.empty h3 { margin: 0 0 6px; color: var(--text); font-size: 15px; }
+.empty h3 { margin: 0 0 6px; color: var(--text); font-family: var(--mono); font-size: 13px; letter-spacing: .14em; text-transform: uppercase; }
 
 .offender-list { margin: 8px 0 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 12px; color: var(--dim); column-width: 130px; }
 .offender-list li { padding: 1px 0; }
 
 kbd.formula {
   display: block; font-family: var(--mono); font-size: 12px; color: var(--dim);
-  background: var(--raised); border: 1px solid var(--border-soft); border-radius: 6px;
-  padding: 8px 10px; margin: 6px 0 10px; white-space: normal;
+  background: rgba(5,6,11,.6); border: 1px solid var(--border-soft); border-left: 2px solid var(--trace);
+  border-radius: 0 6px 6px 0; padding: 8px 10px; margin: 6px 0 10px; white-space: normal;
 }
 
 /* ---------- mobile: drawer, not display:none ---------- */
@@ -274,19 +317,19 @@ kbd.formula {
   .sidebar {
     position: fixed; left: 0; top: 0; bottom: 0; z-index: 60; height: 100vh;
     transform: translateX(-100%); transition: transform .22s ease-out;
-    box-shadow: 12px 0 40px rgba(0,0,0,.45);
+    box-shadow: 12px 0 40px rgba(0,0,0,.6); background: rgba(4,6,12,.96);
   }
   .shell.drawer-open .sidebar { transform: none; }
   .shell.drawer-open .scrim {
     display: block; position: fixed; inset: 0; z-index: 50;
-    background: rgba(6,7,10,.55); border: none;
+    background: rgba(2,3,7,.6); border: none;
   }
   .hamburger {
     display: flex; flex-direction: column; justify-content: center; gap: 4px;
     width: 34px; height: 34px; padding: 7px; border-radius: 7px;
   }
   .hamburger:hover { background: var(--raised); }
-  .hamburger i { display: block; height: 2px; background: var(--text); border-radius: 1px; }
+  .hamburger i { display: block; height: 2px; background: var(--accent); border-radius: 1px; }
   .header { padding: 0 14px; gap: 10px; }
   .header .chip { display: none; }
   .view { padding: 16px 14px; }
@@ -1686,45 +1729,328 @@ function offenderListHTML(offenders, model, cap = 24) {
 
 
 // ---- src/views/command.js ----
-// Command — portfolio KPI row + parse sanity list. Every stat opens a modal.
+// Command — the Observatory. A radial chronometer (the plan span as a ring,
+// activities as concentric arcs per WBS band, the data date as a needle) and
+// a constellation map (activities as stars on time × chainage, relationships
+// as hairlines). Both canvases are hit-tested: every arc and star opens the
+// real task modal. All numbers remain the kernel's — the exotic skin never
+// invents data.
 
 
+
+
+const TAU = Math.PI * 2;
+
+function cssVar(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function planSpan(m) {
+  let t0 = Infinity, t1 = 0;
+  for (const t of m.tasks) {
+    if (t.targetStart !== undefined) t0 = Math.min(t0, t.targetStart);
+    if (t.targetEnd !== undefined) t1 = Math.max(t1, t.targetEnd);
+  }
+  return [t0, t1];
+}
+
+// ---------- the chronometer dial ----------
+function drawDial(ctx, w, h, m, bands, hits) {
+  hits.length = 0;
+  const cx = w / 2, cy = h / 2;
+  const R = Math.min(w, h) / 2 - 26;
+  const [t0, t1] = planSpan(m);
+  if (!Number.isFinite(t0) || t1 <= t0) return;
+  const ang = (ms) => -Math.PI / 2 + ((ms - t0) / (t1 - t0)) * TAU;
+
+  // month ring + ticks
+  ctx.strokeStyle = cssVar('--border'); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, R + 14, 0, TAU); ctx.stroke();
+  ctx.font = '9px ' + cssVar('--mono');
+  const d0 = new Date(dayFloor(t0));
+  let mth = Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth() + 1, 1);
+  while (mth < t1) {
+    const a = ang(mth);
+    const x1 = cx + Math.cos(a) * (R + 10), y1 = cy + Math.sin(a) * (R + 10);
+    const x2 = cx + Math.cos(a) * (R + 18), y2 = cy + Math.sin(a) * (R + 18);
+    ctx.strokeStyle = cssVar('--dim-2');
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    const md = new Date(mth);
+    if (md.getUTCMonth() % 2 === 0) {
+      ctx.fillStyle = cssVar('--dim-2');
+      const lx = cx + Math.cos(a) * (R + 24), ly = cy + Math.sin(a) * (R + 24);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(`${String(md.getUTCMonth() + 1).padStart(2, '0')}/${String(md.getUTCFullYear()).slice(2)}`, lx, ly);
+    }
+    mth = Date.UTC(md.getUTCFullYear(), md.getUTCMonth() + 1, 1);
+  }
+
+  // WBS bands: concentric arcs, outermost = first band
+  const rInner = R * 0.34;
+  const bandW = (R - rInner) / Math.max(bands.length, 1);
+  bands.forEach((band, bi) => {
+    const r = R - bi * bandW - bandW / 2;
+    // faint orbit line
+    ctx.strokeStyle = 'rgba(76,88,113,.18)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.stroke();
+    for (const t of band.tasks) {
+      if (t.targetStart === undefined || t.targetEnd === undefined) continue;
+      const a0 = ang(t.targetStart), a1 = Math.max(ang(t.targetEnd), a0 + 0.012);
+      const crit = t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete';
+      ctx.lineWidth = Math.max(bandW * 0.5, 3);
+      ctx.lineCap = 'round';
+      if (crit) {
+        ctx.strokeStyle = 'rgba(255,111,102,.28)'; ctx.lineWidth += 4;
+        ctx.beginPath(); ctx.arc(cx, cy, r, a0, a1); ctx.stroke();
+        ctx.lineWidth -= 4;
+      }
+      ctx.strokeStyle = crit ? cssVar('--bad')
+        : t.status === 'TK_Complete' ? 'rgba(38,165,161,.85)'
+        : t.status === 'TK_Active' ? cssVar('--accent')
+        : 'rgba(76,88,113,.6)';
+      ctx.beginPath(); ctx.arc(cx, cy, r, a0, a1); ctx.stroke();
+      if (t.milestone) {
+        const mx = cx + Math.cos(a0) * r, my = cy + Math.sin(a0) * r;
+        ctx.fillStyle = crit ? cssVar('--bad') : cssVar('--text');
+        ctx.beginPath(); ctx.arc(mx, my, 2.6, 0, TAU); ctx.fill();
+      }
+      hits.push({ kind: 'arc', t, r, a0, a1, tol: Math.max(bandW * 0.4, 5) });
+    }
+  });
+
+  // data-date needle
+  if (m.dataDate !== undefined && m.dataDate >= t0 && m.dataDate <= t1) {
+    const a = ang(m.dataDate);
+    const nx = cx + Math.cos(a) * (R + 8), ny = cy + Math.sin(a) * (R + 8);
+    ctx.strokeStyle = cssVar('--accent'); ctx.lineWidth = 1.2;
+    ctx.shadowColor = cssVar('--accent'); ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * rInner * 0.6, cy + Math.sin(a) * rInner * 0.6); ctx.lineTo(nx, ny); ctx.stroke();
+    ctx.beginPath(); ctx.arc(nx, ny, 3, 0, TAU); ctx.fillStyle = cssVar('--accent'); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // center readout
+  ctx.textAlign = 'center';
+  ctx.fillStyle = cssVar('--text');
+  ctx.font = '300 30px ' + cssVar('--mono');
+  ctx.fillText(window.__prismDialCenter || '', cx, cy - 2);
+  ctx.fillStyle = cssVar('--dim-2');
+  ctx.font = '9px ' + cssVar('--mono');
+  ctx.fillText('E A R N E D', cx, cy + 18);
+  ctx.textAlign = 'left';
+}
+
+// ---------- the constellation map ----------
+function drawConstellation(ctx, w, h, m, hits) {
+  hits.length = 0;
+  const pad = { l: 56, r: 14, t: 14, b: 24 };
+  const [t0, t1] = planSpan(m);
+  if (!Number.isFinite(t0) || t1 <= t0) return;
+  const kps = m.tasks.filter((t) => t.chainage !== null).map((t) => t.chainage);
+  const kpMin = Math.min(...kps), kpMax = Math.max(...kps);
+  const noKp = m.tasks.filter((t) => t.chainage === null && t.targetStart !== undefined);
+  const X = (ms) => pad.l + ((ms - t0) / (t1 - t0)) * (w - pad.l - pad.r);
+  const laneH = 16;
+  const topBand = noKp.length ? Math.min(noKp.length, 6) * laneH + 10 : 0;
+  const Y = (t, i) => {
+    if (t.chainage !== null && kpMax > kpMin) {
+      return pad.t + topBand + ((t.chainage - kpMin) / (kpMax - kpMin)) * (h - pad.t - pad.b - topBand - 8);
+    }
+    return pad.t + (i % 6) * laneH + 6;
+  };
+  const pos = new Map();
+  let idx = 0;
+  for (const t of m.tasks) {
+    if (t.targetStart === undefined || t.targetEnd === undefined) continue;
+    const mid = (t.targetStart + t.targetEnd) / 2;
+    pos.set(t.id, { x: X(mid), y: Y(t, t.chainage === null ? idx++ : 0), t });
+  }
+
+  // KP gridlines
+  ctx.font = '9px ' + cssVar('--mono');
+  if (kps.length && kpMax > kpMin) {
+    for (let kp = Math.ceil(kpMin / 6) * 6; kp <= kpMax; kp += 6) {
+      const y = pad.t + topBand + ((kp - kpMin) / (kpMax - kpMin)) * (h - pad.t - pad.b - topBand - 8);
+      ctx.strokeStyle = 'rgba(34,48,73,.4)';
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+      ctx.fillStyle = cssVar('--dim-2');
+      ctx.fillText(`KP${kp}`, 8, y + 3);
+    }
+  }
+  // time ticks (quarters)
+  const q0 = new Date(dayFloor(t0));
+  let q = Date.UTC(q0.getUTCFullYear(), Math.floor(q0.getUTCMonth() / 3) * 3 + 3, 1);
+  while (q < t1) {
+    const x = X(q);
+    ctx.strokeStyle = 'rgba(34,48,73,.35)';
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, h - pad.b); ctx.stroke();
+    const qd = new Date(q);
+    ctx.fillStyle = cssVar('--dim-2');
+    ctx.fillText(`${String(qd.getUTCMonth() + 1).padStart(2, '0')}/${String(qd.getUTCFullYear()).slice(2)}`, x - 12, h - 9);
+    q = Date.UTC(qd.getUTCFullYear(), qd.getUTCMonth() + 3, 1);
+  }
+
+  // relationship hairlines
+  for (const p of m.preds) {
+    const a = pos.get(p.predTaskId), b = pos.get(p.taskId);
+    if (!a || !b) continue;
+    const critLink = [a.t, b.t].every((t) => t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete');
+    ctx.strokeStyle = critLink ? 'rgba(255,111,102,.4)' : 'rgba(110,231,226,.1)';
+    ctx.lineWidth = critLink ? 1.1 : 0.7;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+
+  // stars
+  for (const { x, y, t } of pos.values()) {
+    const crit = t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete';
+    const rad = Math.max(Math.sqrt((t.targetCost || 40000) / 1e6) * 3.4, 2.2);
+    const color = crit ? cssVar('--bad')
+      : t.status === 'TK_Complete' ? 'rgba(38,165,161,.9)'
+      : t.status === 'TK_Active' ? cssVar('--accent')
+      : 'rgba(139,151,173,.65)';
+    if (crit || t.status === 'TK_Active') {
+      ctx.shadowColor = color; ctx.shadowBlur = 10;
+    }
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x, y, rad, 0, TAU); ctx.fill();
+    ctx.shadowBlur = 0;
+    if (t.milestone) {
+      ctx.strokeStyle = color; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(x, y, rad + 3, 0, TAU); ctx.stroke();
+    }
+    hits.push({ kind: 'star', t, x, y, tol: rad + 5 });
+  }
+
+  // data-date scan line
+  if (m.dataDate !== undefined && m.dataDate > t0 && m.dataDate < t1) {
+    const x = X(m.dataDate);
+    const grad = ctx.createLinearGradient(x - 26, 0, x, 0);
+    grad.addColorStop(0, 'rgba(110,231,226,0)');
+    grad.addColorStop(1, 'rgba(110,231,226,.10)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x - 26, pad.t, 26, h - pad.t - pad.b);
+    ctx.strokeStyle = cssVar('--accent'); ctx.lineWidth = 1;
+    ctx.setLineDash([2, 4]);
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, h - pad.b); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = cssVar('--accent');
+    ctx.fillText('DATA DATE', x + 5, pad.t + 9);
+  }
+}
+
+function wireCanvasHits(canvas, box, m, hits, isDial) {
+  const tip = chartTip(box);
+  const find = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if (isDial) {
+      const cx = rect.width / 2, cy = rect.height / 2;
+      const dx = mx - cx, dy = my - cy;
+      const r = Math.hypot(dx, dy);
+      let a = Math.atan2(dy, dx);
+      for (const hh of hits) {
+        if (Math.abs(r - hh.r) > hh.tol) continue;
+        let aa = a;
+        while (aa < hh.a0) aa += TAU;
+        if (aa <= hh.a1 + 0.02) return hh;
+      }
+      return null;
+    }
+    let best = null, bestD = Infinity;
+    for (const hh of hits) {
+      const d = Math.hypot(mx - hh.x, my - hh.y);
+      if (d <= hh.tol && d < bestD) { best = hh; bestD = d; }
+    }
+    return best;
+  };
+  canvas.addEventListener('mousemove', (e) => {
+    const hit = find(e);
+    canvas.style.cursor = hit ? 'pointer' : 'default';
+    if (!hit) { tip.hide(); return; }
+    const rect = canvas.getBoundingClientRect();
+    const t = hit.t;
+    tip.show(`<span class="num">${esc(t.code)}</span> ${esc(t.name.slice(0, 38))}<br>` +
+      `<b>${fmtDate(t.targetStart)} → ${fmtDate(t.targetEnd)}</b>` +
+      (t.chainage !== null ? `<br>KP <b>${t.chainage.toFixed(1)}</b>` : ''),
+      e.clientX - rect.left, e.clientY - rect.top);
+  });
+  canvas.addEventListener('mouseleave', () => tip.hide());
+  canvas.addEventListener('click', (e) => {
+    const hit = find(e);
+    if (hit) openModal(`${hit.t.code} — ${hit.t.name}`, 'telemetry detail', taskModalBody(hit.t, m));
+  });
+}
 
 const ViewCommand = {
-  id: 'command', title: 'Command', group: 'Overview',
+  id: 'command', title: 'Observatory', group: 'Overview',
   chip(store) {
     const m = store.model;
     return m ? `as of <span class="num">${fmtDate(m.dataDate)}</span>` : '';
   },
   render(el, store) {
     const m = store.model;
-    const { evm, dcma, rollup } = store.d;
+    const { evm, dcma } = store.d;
     const critical = m.tasks.filter((t) => t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete');
     const dcmaPass = dcma.filter((c) => c.status === 'pass').length;
     const dcmaNA = dcma.filter((c) => c.status === 'na').length;
-
     const spiTone = evm.spi.value === null ? '' : evm.spi.value >= 0.95 ? 'good' : evm.spi.value >= 0.85 ? 'warn' : 'bad';
     const cpiTone = evm.cpi.value === null ? '' : evm.cpi.value >= 0.95 ? 'good' : evm.cpi.value >= 0.85 ? 'warn' : 'bad';
+
+    // dial bands: level-1 WBS nodes that carry tasks in their subtree
+    const bands = [];
+    const gather = (node) => {
+      const out = [...node.tasks];
+      for (const c of node.children) out.push(...gather(c));
+      return out;
+    };
+    for (const child of m.wbsRoot.children) {
+      const tasks = gather(child);
+      if (tasks.length) bands.push({ name: child.name, tasks });
+    }
+    if (!bands.length) bands.push({ name: m.wbsRoot.name, tasks: m.tasks });
+    window.__prismDialCenter = evm.earnedPct !== undefined ? (evm.earnedPct * 100).toFixed(1) + '%' : '—';
 
     el.innerHTML = `
       <div class="banner">
         <b>${esc(store.modelName)}</b>
-        <span>data date ${fmtDate(m.dataDate)} (from <span class="num">${esc(m.dataDateSource || 'n/a')}</span>)</span>
-        <span>plan ${fmtDate(m.project.plan_start_date && m.tasks[0] ? m.tasks.reduce((a, t) => Math.min(a, t.targetStart ?? a), Infinity) : undefined)} → ${fmtDate(m.tasks.reduce((a, t) => Math.max(a, t.targetEnd ?? a), 0))}</span>
+        <span>data date ${fmtDate(m.dataDate)} · <span class="num">${esc(m.dataDateSource || 'n/a')}</span></span>
         ${store.baseline ? `<span>baseline <b>${esc(store.baselineName)}</b></span>` : `<span>${naTag('no baseline loaded — compare & 3 DCMA checks unavailable')}</span>`}
       </div>
 
       <div class="section">
-        <h2>Portfolio</h2>
-        <p class="sub">Click any figure for its derivation.</p>
-        <div class="statrow">
-          ${statTile({ id: 'acts', label: 'Activities', value: '<span data-count="acts">0</span>', note: `${m.preds.length} relationships` })}
-          ${statTile({ id: 'spi', label: 'SPI', value: valueOrNA(fmtRatio(evm.spi.value), evm.spi.reason), tone: spiTone, note: 'EV ÷ PV at data date' })}
-          ${statTile({ id: 'cpi', label: 'CPI', value: valueOrNA(fmtRatio(evm.cpi.value), evm.cpi.reason), tone: cpiTone, note: 'EV ÷ AC' })}
-          ${statTile({ id: 'earned', label: '% Earned', value: valueOrNA(fmtPct(evm.earnedPct), 'no costs in file'), note: `of ${fmtMoney(evm.bac)} BAC` })}
-          ${statTile({ id: 'crit', label: 'Critical', value: `<span data-count="crit">0</span>`, note: 'float ≤ 0, incomplete', tone: critical.length ? 'bad' : 'good' })}
-          ${statTile({ id: 'dcma', label: 'DCMA', value: `<span class="num">${dcmaPass}/${14 - dcmaNA}</span>`, note: dcmaNA ? `${dcmaNA} not computable` : 'all computable', tone: dcmaPass >= 10 ? 'good' : 'warn' })}
+        <h2>Observatory</h2>
+        <p class="sub">The plan span as one revolution; each orbit is a WBS band, each arc an activity. The needle is the data date. Hover to read, click to open — arcs and stars are live.</p>
+        <div class="observatory">
+          <div class="dialbox chartbox"><canvas></canvas></div>
+          <div class="readouts">
+            <div class="statrow">
+              ${statTile({ id: 'acts', label: 'Activities', value: '<span data-count="acts">0</span>', note: `${m.preds.length} relationships` })}
+              ${statTile({ id: 'crit', label: 'Critical', value: `<span data-count="crit">0</span>`, note: 'float ≤ 0, incomplete', tone: critical.length ? 'bad' : 'good' })}
+            </div>
+            <div class="statrow">
+              ${statTile({ id: 'spi', label: 'SPI', value: valueOrNA(fmtRatio(evm.spi.value), evm.spi.reason), tone: spiTone, note: 'EV ÷ PV at data date' })}
+              ${statTile({ id: 'cpi', label: 'CPI', value: valueOrNA(fmtRatio(evm.cpi.value), evm.cpi.reason), tone: cpiTone, note: 'EV ÷ AC' })}
+            </div>
+            <div class="statrow">
+              ${statTile({ id: 'earned', label: '% Earned', value: valueOrNA(fmtPct(evm.earnedPct), 'no costs in file'), note: `of ${fmtMoney(evm.bac)} BAC` })}
+              ${statTile({ id: 'dcma', label: 'DCMA', value: `<span class="num">${dcmaPass}/${14 - dcmaNA}</span>`, note: dcmaNA ? `${dcmaNA} not computable` : 'all computable', tone: dcmaPass >= 10 ? 'good' : 'warn' })}
+            </div>
+          </div>
         </div>
+        ${a11yTable('Activities by WBS band', ['Band', 'Activities'], bands.map((b) => [b.name, b.tasks.length]))}
+      </div>
+
+      <div class="section">
+        <h2>Constellation</h2>
+        <p class="sub">Every activity as a star — time across, chainage down (unchainaged work rides the top lanes). Hairlines are relationships; the red thread is the critical chain. Click a star for its telemetry.</p>
+        <div class="chartbox"><canvas data-map></canvas></div>
+        <div class="legend">
+          <span><i class="dot" style="background:rgba(38,165,161,.9)"></i>complete</span>
+          <span><i class="dot" style="background:var(--accent)"></i>in progress</span>
+          <span><i class="dot" style="background:rgba(139,151,173,.65)"></i>not started</span>
+          <span><i class="dot" style="background:var(--bad)"></i>critical</span>
+        </div>
+        ${a11yTable('Activity constellation', ['Code', 'Activity', 'Start', 'Finish', 'KP', 'Status'],
+          m.tasks.map((t) => [t.code, t.name, fmtDate(t.targetStart), fmtDate(t.targetEnd),
+            t.chainage !== null ? t.chainage.toFixed(1) : 'n/a', t.status]))}
       </div>
 
       <div class="section">
@@ -1743,6 +2069,17 @@ const ViewCommand = {
 
     countUp(el.querySelector('[data-count="acts"]'), m.tasks.length, (v) => String(Math.round(v)));
     countUp(el.querySelector('[data-count="crit"]'), critical.length, (v) => String(Math.round(v)));
+
+    const dialCanvas = el.querySelector('.dialbox canvas');
+    const dialHits = [];
+    const dialSize = Math.min(460, Math.max(dialCanvas.parentElement.clientWidth || 420, 300));
+    mountCanvas(dialCanvas, dialSize, (ctx, w, h) => drawDial(ctx, w, h, m, bands, dialHits));
+    wireCanvasHits(dialCanvas, dialCanvas.parentElement, m, dialHits, true);
+
+    const mapCanvas = el.querySelector('[data-map]');
+    const mapHits = [];
+    mountCanvas(mapCanvas, 340, (ctx, w, h) => drawConstellation(ctx, w, h, m, mapHits));
+    wireCanvasHits(mapCanvas, mapCanvas.parentElement, m, mapHits, false);
 
     const statModals = {
       acts: () => openModal('Activities', `${m.tasks.length} in file`, `
@@ -1777,7 +2114,7 @@ const ViewCommand = {
         <div class="tablewrap"><table class="ledger"><tbody>
           ${dcma.map((c) => `<tr><td class="num">${c.id}</td><td>${esc(c.name)}</td><td>${statusPill(c.status)}</td></tr>`).join('')}
         </tbody></table></div>
-        <p style="color:var(--dim);font-size:12.5px;margin-top:10px">Full detail on the Health view.</p>`),
+        <p style="color:var(--dim);font-size:12.5px;margin-top:10px">Full detail on the Schedule Health view.</p>`),
     };
     el.querySelectorAll('[data-stat]').forEach((b) =>
       b.addEventListener('click', () => statModals[b.dataset.stat]?.()));
@@ -2159,7 +2496,7 @@ const ViewSCurve = {
         <div class="chartbox"><canvas></canvas></div>
         <div class="legend">
           <span><i style="background:var(--raised-2);border:1px solid var(--border);height:8px"></i>PV per month</span>
-          <span><i style="background:var(--accent)"></i>cumulative PV</span>
+          <span><i style="background:var(--chart-line)"></i>cumulative PV</span>
           ${baseEvm ? '<span><i style="background:var(--trace)"></i>baseline cumulative PV</span>' : ''}
           <span><i class="dot" style="background:var(--good)"></i>EV at data date</span>
           <span><i class="dot" style="background:var(--bad)"></i>AC at data date</span>
@@ -2232,8 +2569,8 @@ const ViewSCurve = {
         });
         ctx.stroke();
       }
-      // cumulative PV — the one brass line
-      ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2; ctx.beginPath();
+      // cumulative PV — the one signal line
+      ctx.strokeStyle = css('--chart-line'); ctx.lineWidth = 2; ctx.beginPath();
       pv.forEach((p, i) => (i === 0 ? ctx.moveTo(X(i), Y(p.cum)) : ctx.lineTo(X(i), Y(p.cum))));
       ctx.stroke();
 
@@ -2633,6 +2970,48 @@ const store = {
   },
 };
 
+// The drifting star field behind everything — pure decoration, drawn once
+// (static) for reduced-motion users, and never load-bearing for layout.
+function mountStarfield(canvas) {
+  const ctx = canvas.getContext('2d');
+  let stars = [];
+  const seed = (w, h) => {
+    stars = [];
+    const n = Math.round((w * h) / 11000);
+    for (let i = 0; i < n; i++) {
+      stars.push({
+        x: Math.random() * w, y: Math.random() * h,
+        r: 0.3 + Math.random() * 1.1,
+        v: 0.008 + Math.random() * 0.03,       // drift px/frame (parallax by size)
+        p: Math.random() * Math.PI * 2,         // twinkle phase
+        hue: Math.random() < 0.12 ? '139,123,255' : Math.random() < 0.3 ? '110,231,226' : '223,231,242',
+      });
+    }
+  };
+  const size = () => {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = innerWidth * dpr; canvas.height = innerHeight * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    seed(innerWidth, innerHeight);
+  };
+  const still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let t = 0;
+  const frame = () => {
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    t += 0.016;
+    for (const s of stars) {
+      if (!still) { s.x -= s.v * s.r; if (s.x < -2) s.x = innerWidth + 2; }
+      const tw = still ? 0.75 : 0.55 + 0.45 * Math.sin(t * 0.8 + s.p);
+      ctx.fillStyle = `rgba(${s.hue},${(0.5 * tw * s.r).toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+    }
+    if (!still) requestAnimationFrame(frame);
+  };
+  size();
+  window.addEventListener('resize', size);
+  frame();
+}
+
 function renderSidebar(shell) {
   const groups = [];
   for (const v of VIEWS) {
@@ -2642,7 +3021,7 @@ function renderSidebar(shell) {
   }
   const nav = shell.querySelector('.sidebar');
   nav.innerHTML = `
-    <div class="brand"><i></i><b>PRISM</b><span>FIELD LEDGER</span></div>
+    <div class="brand"><i></i><b>PRISM</b><span>DEEP FIELD</span></div>
     ${groups.map((g) => `
       <div class="navgroup">
         <h3>${esc(g.name)}</h3>
@@ -2708,6 +3087,7 @@ function renderView(shell) {
 
 function boot(root = document.body) {
   root.innerHTML = `
+    <canvas class="stars" aria-hidden="true"></canvas>
     <div class="shell">
       <button class="scrim" aria-label="Close menu" tabindex="-1"></button>
       <nav class="sidebar" aria-label="Views"></nav>
@@ -2717,6 +3097,7 @@ function boot(root = document.body) {
       </div>
     </div>`;
   const shell = root.querySelector('.shell');
+  mountStarfield(root.querySelector('canvas.stars'));
   renderSidebar(shell);
   shell.querySelector('.scrim').addEventListener('click', () => shell.classList.remove('drawer-open'));
 
