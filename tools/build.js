@@ -23,6 +23,7 @@ const ORDER = [
   'src/kernel/compare.js',
   'src/kernel/period.js',
   'src/kernel/trend.js',
+  'src/kernel/montecarlo.js',
   'src/data/demo.js',
   'src/ui/modal.js',
   'src/ui/components.js',
@@ -39,6 +40,7 @@ const ORDER = [
   'src/views/resource.js',
   'src/views/compare.js',
   'src/views/trend.js',
+  'src/views/risk.js',
   'src/app.js',
 ];
 

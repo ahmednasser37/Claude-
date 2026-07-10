@@ -24,6 +24,7 @@ import { ViewReport } from './views/report.js';
 import { ViewLookahead } from './views/lookahead.js';
 import { ViewRegister } from './views/register.js';
 import { ViewTrend } from './views/trend.js';
+import { ViewRisk } from './views/risk.js';
 import { ViewGantt } from './views/gantt.js';
 import { ViewChainage } from './views/chainage.js';
 import { ViewSCurve } from './views/scurve.js';
@@ -32,7 +33,7 @@ import { ViewCompare } from './views/compare.js';
 
 const VIEWS = [ViewCommand, ViewWBS, ViewHealth,
   ViewTimeline, ViewReport, ViewLookahead, ViewRegister,
-  ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare, ViewTrend];
+  ViewGantt, ViewChainage, ViewRisk, ViewSCurve, ViewResource, ViewCompare, ViewTrend];
 
 export const store = {
   model: null, modelName: '', baseline: null, baselineName: '',

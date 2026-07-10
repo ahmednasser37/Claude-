@@ -1922,6 +1922,147 @@ function buildTrend(updates) {
 }
 
 
+// ---- src/kernel/montecarlo.js ----
+// montecarlo.js — real schedule risk simulation. Pure, seeded, reproducible.
+//
+// Each iteration samples a triangular duration multiplier for every
+// INCOMPLETE activity (completed work is history — its duration is fixed),
+// rebuilds the duration set, and re-runs the full CPM forward/backward pass
+// over the actual relationship network. This is the spec's bar: a fixed-seed
+// random multiplier on one aggregate number would look authoritative while
+// being disconnected from the schedule logic — so the logic runs every time.
+//
+// Model caveat (same as DCMA check 12, stated everywhere it surfaces): the
+// CPM is the logic-integrity model — working-day units, original durations,
+// lags at the project calendar's day length.
+
+
+
+// mulberry32 — small, fast, deterministic PRNG
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// triangular sample from uniform u over [a, b] with mode m
+function triSample(u, a, m, b) {
+  if (b <= a) return a;
+  const f = (m - a) / (b - a);
+  return u < f
+    ? a + Math.sqrt(u * (b - a) * (m - a))
+    : b - Math.sqrt((1 - u) * (b - a) * (b - m));
+}
+
+const MC_SPREADS = {
+  tight: { label: 'Tight (95 / 100 / 115%)', o: 0.95, m: 1.0, p: 1.15 },
+  moderate: { label: 'Moderate (90 / 100 / 130%)', o: 0.90, m: 1.0, p: 1.30 },
+  wide: { label: 'Wide (80 / 100 / 150%)', o: 0.80, m: 1.0, p: 1.50 },
+};
+
+function runMonteCarlo(model, { iterations = 1000, spread = MC_SPREADS.moderate, seed = 20260710 } = {}) {
+  const det = runCPM(model);
+  if (det.cyclic) return { ok: false, reason: 'Relationship network contains a cycle — CPM simulation not possible.' };
+
+  const rand = mulberry32(seed);
+  const uncertain = model.tasks.filter((t) =>
+    t.status !== 'TK_Complete' && !t.milestone && (t.origDays ?? 0) > 0);
+  if (uncertain.length === 0) {
+    return { ok: false, reason: 'No incomplete activities with duration — nothing to simulate.' };
+  }
+
+  const finishes = new Float64Array(iterations);
+  const critCount = new Map(model.tasks.map((t) => [t.id, 0]));
+  const samples = new Map(uncertain.map((t) => [t.id, new Float64Array(iterations)]));
+
+  for (let i = 0; i < iterations; i++) {
+    const override = new Map();
+    for (const t of uncertain) {
+      const mult = triSample(rand(), spread.o, spread.m, spread.p);
+      samples.get(t.id)[i] = mult;
+      override.set(t.id, t.origDays * mult);
+    }
+    const r = runCPM(model, { durationOverride: override });
+    finishes[i] = r.finishDays;
+    for (const n of r.order) {
+      if (n.d > 0 && n.tf <= 1e-9) critCount.set(n.id, critCount.get(n.id) + 1);
+    }
+  }
+
+  const sorted = [...finishes].sort((a, b) => a - b);
+  const pct = (p) => sorted[Math.min(Math.floor((p / 100) * iterations), iterations - 1)];
+
+  // working-day counts anchor to the plan start on the project calendar
+  let anchor = Infinity;
+  for (const t of model.tasks) if (t.targetStart !== undefined) anchor = Math.min(anchor, t.targetStart);
+  anchor = dayFloor(anchor);
+  const toDate = (days) => addWorkingDays(model.projectCal, anchor, Math.round(days));
+
+  // probability of meeting the deterministic finish and any mandatory finish
+  const pAtMost = (days) => sorted.filter((f) => f <= days + 1e-9).length / iterations;
+  let constraint = null;
+  const mand = model.tasks.find((t) => t.cstrType === 'CS_MANDFIN' && t.cstrDate !== undefined);
+  if (mand) {
+    const cDays = workingDaysBetween(model.projectCal, anchor, mand.cstrDate);
+    constraint = { task: mand, date: mand.cstrDate, days: cDays, pMeet: pAtMost(cDays) };
+  }
+
+  // criticality index — fraction of iterations on the critical path
+  const criticality = model.tasks
+    .map((t) => ({ t, index: critCount.get(t.id) / iterations }))
+    .filter((x) => x.index > 0.01 && !x.t.milestone)
+    .sort((a, b) => b.index - a.index);
+
+  // duration sensitivity — Pearson correlation of each activity's sampled
+  // multiplier against the iteration finish (the tornado)
+  const meanF = finishes.reduce((a, v) => a + v, 0) / iterations;
+  const sdF = Math.sqrt(finishes.reduce((a, v) => a + (v - meanF) ** 2, 0) / iterations) || 1;
+  const sensitivity = uncertain.map((t) => {
+    const xs = samples.get(t.id);
+    const meanX = xs.reduce((a, v) => a + v, 0) / iterations;
+    const sdX = Math.sqrt(xs.reduce((a, v) => a + (v - meanX) ** 2, 0) / iterations) || 1;
+    let cov = 0;
+    for (let i = 0; i < iterations; i++) cov += (xs[i] - meanX) * (finishes[i] - meanF);
+    cov /= iterations;
+    return { t, r: cov / (sdX * sdF) };
+  }).sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
+
+  // histogram buckets for the finish distribution
+  const lo = sorted[0], hi = sorted[iterations - 1];
+  const nBins = Math.min(Math.max(Math.round(Math.sqrt(iterations) / 2), 12), 40);
+  const binW = (hi - lo) / nBins || 1;
+  const bins = Array.from({ length: nBins }, (_, k) => ({
+    fromDays: lo + k * binW, toDays: lo + (k + 1) * binW, count: 0,
+  }));
+  for (const f of sorted) {
+    const k = Math.min(Math.floor((f - lo) / binW), nBins - 1);
+    bins[k].count++;
+  }
+
+  return {
+    ok: true,
+    iterations, seed, spread,
+    deterministicDays: det.finishDays,
+    deterministicDate: toDate(det.finishDays),
+    pDeterministic: pAtMost(det.finishDays),
+    p10: { days: pct(10), date: toDate(pct(10)) },
+    p50: { days: pct(50), date: toDate(pct(50)) },
+    p80: { days: pct(80), date: toDate(pct(80)) },
+    p90: { days: pct(90), date: toDate(pct(90)) },
+    minDays: lo, maxDays: hi,
+    bins, sorted, toDate,
+    constraint,
+    criticality, sensitivity,
+    uncertainCount: uncertain.length,
+    anchor,
+  };
+}
+
+
 // ---- src/data/demo.js ----
 // GENERATED by tools/make-fixture.js — do not edit by hand.
 const DEMO_NAME = 'najd-s2-update.xer';
@@ -4397,6 +4538,214 @@ const ViewTrend = {
 };
 
 
+// ---- src/views/risk.js ----
+// Risk — Monte Carlo schedule risk analysis. Every number on this page comes
+// from thousands of real CPM passes over the actual network; the seed is
+// shown so any run can be reproduced exactly.
+
+
+
+
+function riskCss(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const ViewRisk = {
+  id: 'risk', title: 'Risk (Monte Carlo)', group: 'Schedule',
+  cfg: { iterations: 1000, spreadKey: 'moderate', seed: 20260710 },
+  result: null,
+  chip() {
+    return ViewRisk.result?.ok ? `P80 <span class="num">${fmtDate(ViewRisk.result.p80.date)}</span>` : '';
+  },
+  render(el, store) {
+    const cfg = ViewRisk.cfg;
+    if (!ViewRisk.result || ViewRisk.resultModel !== store.model) {
+      ViewRisk.result = runMonteCarlo(store.model, {
+        iterations: cfg.iterations, spread: MC_SPREADS[cfg.spreadKey], seed: cfg.seed,
+      });
+      ViewRisk.resultModel = store.model;
+    }
+    const mc = ViewRisk.result;
+
+    const controls = `
+      <div class="filterrow">
+        <select data-mc-iter aria-label="Iterations">
+          ${[500, 1000, 2000, 5000].map((n) => `<option value="${n}" ${cfg.iterations === n ? 'selected' : ''}>${n} iterations</option>`).join('')}
+        </select>
+        <select data-mc-spread aria-label="Duration uncertainty">
+          ${Object.entries(MC_SPREADS).map(([k, s]) => `<option value="${k}" ${cfg.spreadKey === k ? 'selected' : ''}>${s.label}</option>`).join('')}
+        </select>
+        <input type="number" data-mc-seed value="${cfg.seed}" aria-label="Seed" style="width:120px;font-family:var(--mono);font-size:12px;background:var(--raised);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:5px 9px">
+        <button class="btn small primary" data-mc-run>Re-run</button>
+        <span class="spacer"></span>
+        ${mc.ok ? '<button class="btn small" data-csv>Export CSV</button>' : ''}
+      </div>`;
+
+    if (!mc.ok) {
+      el.innerHTML = `<div class="section"><h2>Schedule risk</h2>${controls}
+        <div class="empty"><h3>Simulation not possible</h3><p>${esc(mc.reason)}</p></div></div>`;
+      ViewRisk.wireControls(el, store);
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Schedule risk — Monte Carlo</h2>
+        <p class="sub">${mc.iterations} full CPM passes over the live network, triangular duration uncertainty on ${mc.uncertainCount} incomplete activities (completed work is history and stays fixed). Logic-integrity model, working-day units. Seed <span class="num">${mc.seed}</span> — every run reproducible.</p>
+        ${controls}
+        <div class="statrow">
+          ${statTile({ id: 'det', label: 'Deterministic', value: `<span class="num" style="font-size:19px">${fmtDate(mc.deterministicDate)}</span>`, note: `only ${(mc.pDeterministic * 100).toFixed(0)}% likely to be met` , tone: mc.pDeterministic < 0.5 ? 'warn' : 'good' })}
+          ${statTile({ id: 'p50', label: 'P50', value: `<span class="num" style="font-size:19px">${fmtDate(mc.p50.date)}</span>`, note: 'even odds' })}
+          ${statTile({ id: 'p80', label: 'P80', value: `<span class="num" style="font-size:19px">${fmtDate(mc.p80.date)}</span>`, note: 'commitment-grade', tone: 'warn' })}
+          ${mc.constraint ? statTile({ id: 'cstr', label: 'Mandatory finish', value: `<span class="num" style="font-size:19px">${(mc.constraint.pMeet * 100).toFixed(0)}%</span>`, note: `chance of meeting ${fmtDate(mc.constraint.date)}`, tone: mc.constraint.pMeet < 0.5 ? 'bad' : mc.constraint.pMeet < 0.8 ? 'warn' : 'good' }) : ''}
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Finish distribution</h2>
+        <p class="sub">Histogram of simulated finishes with the cumulative probability curve beneath — read any target date's confidence off the lower chart.</p>
+        <div class="chartbox"><canvas data-mc="hist"></canvas></div>
+        <div class="chartbox" style="margin-top:2px"><canvas data-mc="cum"></canvas></div>
+        <div class="legend">
+          <span><i style="background:var(--raised-2);border:1px solid var(--border);height:8px"></i>iterations per bin</span>
+          <span><i style="background:var(--chart-line)"></i>cumulative probability</span>
+          <span><i style="background:var(--warn);width:2px;height:10px"></i>P50 / P80</span>
+          ${mc.constraint ? '<span><i style="background:var(--bad);width:2px;height:10px"></i>mandatory finish</span>' : ''}
+        </div>
+        ${a11yTable('Finish distribution', ['Bin from', 'Bin to', 'Iterations'],
+          mc.bins.map((b) => [isoDate(mc.toDate(b.fromDays)), isoDate(mc.toDate(b.toDays)), b.count]))}
+      </div>
+
+      <div class="section">
+        <h2>Criticality index</h2>
+        <p class="sub">How often each activity landed on the critical path across all iterations — near-critical work that a float filter hides shows up here.</p>
+        <div class="tablewrap"><table class="ledger"><tbody>
+          ${mc.criticality.slice(0, 14).map((c, i) => `
+            <tr class="rowlink" data-crit="${i}" tabindex="0">
+              <td class="num" style="width:96px">${esc(c.t.code)}</td>
+              <td>${esc(c.t.name.slice(0, 44))}</td>
+              <td style="width:34%"><span class="bar" style="display:block"><i style="width:${(c.index * 100).toFixed(0)}%;background:${c.index > 0.8 ? 'var(--bad)' : c.index > 0.4 ? 'var(--warn)' : 'var(--chart-line)'}"></i></span></td>
+              <td class="num" style="width:56px">${(c.index * 100).toFixed(0)}%</td>
+            </tr>`).join('')}
+        </tbody></table></div>
+      </div>
+
+      <div class="section">
+        <h2>Duration sensitivity — tornado</h2>
+        <p class="sub">Correlation between each activity's sampled duration and the project finish. Long bars are where risk mitigation actually buys schedule.</p>
+        <div class="tablewrap"><table class="ledger"><tbody>
+          ${mc.sensitivity.slice(0, 12).map((s, i) => `
+            <tr class="rowlink" data-sens="${i}" tabindex="0">
+              <td class="num" style="width:96px">${esc(s.t.code)}</td>
+              <td>${esc(s.t.name.slice(0, 44))}</td>
+              <td style="width:34%"><span class="bar" style="display:block"><i style="width:${Math.min(Math.abs(s.r) * 100, 100).toFixed(0)}%;background:${Math.abs(s.r) > 0.5 ? 'var(--bad)' : 'var(--trace)'}"></i></span></td>
+              <td class="num" style="width:56px">${s.r.toFixed(2)}</td>
+            </tr>`).join('')}
+        </tbody></table></div>
+      </div>`;
+
+    ViewRisk.wireControls(el, store);
+
+    // histogram
+    mountCanvas(el.querySelector('[data-mc="hist"]'), 200, (ctx, w, h) => {
+      const pad = { l: 46, r: 14, t: 10, b: 6 };
+      const maxC = Math.max(...mc.bins.map((b) => b.count));
+      const X = (days) => pad.l + ((days - mc.minDays) / (mc.maxDays - mc.minDays || 1)) * (w - pad.l - pad.r);
+      const bw = (w - pad.l - pad.r) / mc.bins.length;
+      ctx.font = '9px ' + riskCss('--mono');
+      mc.bins.forEach((b, k) => {
+        const bh = (b.count / maxC) * (h - pad.t - pad.b);
+        ctx.fillStyle = riskCss('--raised-2');
+        ctx.strokeStyle = riskCss('--border');
+        ctx.fillRect(pad.l + k * bw + 1, h - pad.b - bh, bw - 2, bh);
+        ctx.strokeRect(pad.l + k * bw + 1.5, h - pad.b - bh + 0.5, bw - 3, bh - 1);
+      });
+      const rule = (days, color, label) => {
+        const x = Math.round(X(days)) + 0.5;
+        ctx.strokeStyle = color; ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, h - pad.b); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = color; ctx.fillText(label, x + 3, pad.t + 8);
+      };
+      rule(mc.p50.days, riskCss('--warn'), 'P50');
+      rule(mc.p80.days, riskCss('--warn'), 'P80');
+      rule(mc.deterministicDays, riskCss('--dim'), 'DET');
+      if (mc.constraint) rule(mc.constraint.days, riskCss('--bad'), 'MAND');
+    });
+
+    // cumulative probability
+    const cumBox = el.querySelector('[data-mc="cum"]').parentElement;
+    const tip = chartTip(cumBox);
+    let cumGeom = null;
+    mountCanvas(el.querySelector('[data-mc="cum"]'), 150, (ctx, w, h) => {
+      const pad = { l: 46, r: 14, t: 8, b: 20 };
+      const X = (days) => pad.l + ((days - mc.minDays) / (mc.maxDays - mc.minDays || 1)) * (w - pad.l - pad.r);
+      const Y = (p) => h - pad.b - p * (h - pad.t - pad.b);
+      ctx.font = '9px ' + riskCss('--mono');
+      for (const p of [0, 0.5, 0.8, 1]) {
+        const y = Math.round(Y(p)) + 0.5;
+        ctx.strokeStyle = 'rgba(34,48,73,.45)';
+        ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+        ctx.fillStyle = riskCss('--dim-2');
+        ctx.fillText(`${p * 100}%`, 8, y + 3);
+      }
+      for (let i = 0; i <= 4; i++) {
+        const days = mc.minDays + ((mc.maxDays - mc.minDays) / 4) * i;
+        ctx.fillStyle = riskCss('--dim-2');
+        ctx.fillText(fmtDate(mc.toDate(days)).slice(0, 6), X(days) - 16, h - 6);
+      }
+      ctx.strokeStyle = riskCss('--chart-line'); ctx.lineWidth = 2; ctx.beginPath();
+      mc.sorted.forEach((f, i) => {
+        const x = X(f), y = Y((i + 1) / mc.sorted.length);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      cumGeom = { pad, X, w, h };
+    });
+    el.querySelector('[data-mc="cum"]').addEventListener('mousemove', (e) => {
+      if (!cumGeom) return;
+      const rect = e.target.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const days = mc.minDays + ((mx - cumGeom.pad.l) / (cumGeom.w - cumGeom.pad.l - cumGeom.pad.r)) * (mc.maxDays - mc.minDays);
+      if (days < mc.minDays || days > mc.maxDays) { tip.hide(); return; }
+      const p = mc.sorted.filter((f) => f <= days).length / mc.sorted.length;
+      tip.show(`${fmtDate(mc.toDate(days))}<br><b>${(p * 100).toFixed(0)}%</b> chance of finishing by then`, mx, e.clientY - rect.top);
+    });
+    el.querySelector('[data-mc="cum"]').addEventListener('mouseleave', () => tip.hide());
+
+    const openTask = (t, sub) => openModal(`${t.code} — ${t.name}`, sub, taskModalBody(t, store.model));
+    el.querySelectorAll('[data-crit]').forEach((tr) => {
+      const open = () => { const c = mc.criticality[+tr.dataset.crit]; openTask(c.t, `critical in ${(c.index * 100).toFixed(0)}% of iterations`); };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+    el.querySelectorAll('[data-sens]').forEach((tr) => {
+      const open = () => { const s = mc.sensitivity[+tr.dataset.sens]; openTask(s.t, `duration↔finish correlation ${s.r.toFixed(2)}`); };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+    el.querySelector('[data-csv]')?.addEventListener('click', () => downloadCSV(
+      `schedule_risk_seed${mc.seed}_${mc.iterations}it.csv`,
+      ['metric', 'value'],
+      [['iterations', mc.iterations], ['seed', mc.seed], ['spread', mc.spread.label],
+        ['deterministic_finish', isoDate(mc.deterministicDate)], ['p_deterministic', (mc.pDeterministic * 100).toFixed(1) + '%'],
+        ['p10', isoDate(mc.p10.date)], ['p50', isoDate(mc.p50.date)], ['p80', isoDate(mc.p80.date)], ['p90', isoDate(mc.p90.date)],
+        ...(mc.constraint ? [['p_meet_mandatory_finish', (mc.constraint.pMeet * 100).toFixed(1) + '%']] : []),
+        ...mc.criticality.slice(0, 20).map((c) => [`criticality_${c.t.code}`, (c.index * 100).toFixed(0) + '%']),
+        ...mc.sensitivity.slice(0, 20).map((s) => [`sensitivity_${s.t.code}`, s.r.toFixed(3)])]));
+  },
+
+  wireControls(el, store) {
+    const cfg = ViewRisk.cfg;
+    el.querySelector('[data-mc-run]').addEventListener('click', () => {
+      cfg.iterations = +el.querySelector('[data-mc-iter]').value;
+      cfg.spreadKey = el.querySelector('[data-mc-spread]').value;
+      cfg.seed = +el.querySelector('[data-mc-seed]').value || 1;
+      ViewRisk.result = null;
+      ViewRisk.render(el.closest('.view') || el, store);
+    });
+  },
+};
+
+
 // ---- src/app.js ----
 // app.js — the Store (the only thing that calls parseXER/buildModel), the
 // shell (sidebar, header, drawer), and the hash router. Views subscribe to
@@ -4429,9 +4778,10 @@ const ViewTrend = {
 
 
 
+
 const VIEWS = [ViewCommand, ViewWBS, ViewHealth,
   ViewTimeline, ViewReport, ViewLookahead, ViewRegister,
-  ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare, ViewTrend];
+  ViewGantt, ViewChainage, ViewRisk, ViewSCurve, ViewResource, ViewCompare, ViewTrend];
 
 const store = {
   model: null, modelName: '', baseline: null, baselineName: '',

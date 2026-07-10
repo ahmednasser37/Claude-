@@ -26,7 +26,7 @@ try {
   await page.waitForSelector('.statrow .stat');
 
   // Command view: demo model loaded, KPI row real
-  check(await page.locator('.navitem').count() === 13, 'sidebar lists 13 views');
+  check(await page.locator('.navitem').count() === 14, 'sidebar lists 14 views');
   await page.waitForFunction(() => document.querySelector('[data-count="acts"]')?.textContent === '43');
   check(true, 'Command KPIs count up to 43 activities');
 
@@ -51,7 +51,7 @@ try {
     ['report', '[data-report-text]'], ['lookahead', '[data-hz]'], ['register', '[data-reg-group]'],
     ['gantt', '.taskcard'], ['chainage', '[data-oos]'], ['scurve', 'canvas'],
     ['resource', '[data-oa]'], ['compare', '[data-load-demo-baseline]'],
-    ['trend', '[data-demo-history]'],
+    ['trend', '[data-demo-history]'], ['risk', '[data-mc="hist"]'],
   ]) {
     await page.click(`[data-view="${id}"]`);
     await page.waitForSelector(probe, { timeout: 5000 });
@@ -107,6 +107,17 @@ try {
   await page.click('[data-hz="42"]');
   await page.waitForFunction(() => document.querySelector('[data-hz="42"]')?.classList.contains('active'));
   check(true, 'lookahead horizon switches to 6 weeks');
+
+  // risk: simulation renders percentiles, criticality and tornado; re-run works
+  await page.click('[data-view="risk"]');
+  await page.waitForSelector('[data-mc="cum"]');
+  check(await page.locator('[data-crit]').count() > 3, 'criticality index table populated');
+  check(await page.locator('[data-sens]').count() > 3, 'sensitivity tornado populated');
+  const p80a = await page.textContent('.header .chip');
+  await page.fill('[data-mc-seed]', '99');
+  await page.click('[data-mc-run]');
+  await page.waitForSelector('[data-mc="hist"]');
+  check(true, `risk re-runs with a new seed (chip was "${p80a.trim()}")`);
 
   // update history: demo loads 2 snapshots + current = 3-point trend
   await page.click('[data-view="trend"]');

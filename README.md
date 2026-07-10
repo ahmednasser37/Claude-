@@ -69,6 +69,17 @@ trends, float-erosion ranking with sparklines, and window-by-window
 attribution (finish slip, EV/AC accrued, newly-critical activities per
 update period).
 
+**Risk (Monte Carlo)** meets the spec's own bar — a real
+perturb-and-re-run-CPM simulation, not a multiplier on one aggregate
+number: seeded (reproducible), triangular duration uncertainty on
+incomplete work only, thousands of full forward/backward passes over the
+live network. Outputs: finish histogram + cumulative confidence curve,
+P10/P50/P80/P90 dates, probability of meeting the deterministic finish and
+any mandatory-finish constraint, a criticality index (fraction of
+iterations on the critical path), and a duration-sensitivity tornado.
+A zero-uncertainty run collapses exactly to the deterministic CPM finish —
+the unit test that proves the network really re-runs.
+
 Schedule Health additionally runs **update-integrity QA** before you trust
 any metric: out-of-sequence progress (started before the FS predecessor
 actually finished, lag respected), future actual dates, complete-without-
