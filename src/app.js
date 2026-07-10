@@ -11,8 +11,9 @@ import { resourceDemand } from './kernel/resource.js';
 import { compareModels } from './kernel/compare.js';
 import { windowReport, buildLookahead, updateIntegrity, floatBands } from './kernel/period.js';
 import { longestPath } from './kernel/cpm.js';
+import { buildTrend } from './kernel/trend.js';
 import { dayFloor, DAY_MS } from './kernel/calendar.js';
-import { DEMO_XER, BASELINE_XER, DEMO_NAME, BASELINE_NAME } from './data/demo.js';
+import { DEMO_XER, BASELINE_XER, DEMO_NAME, BASELINE_NAME, HISTORY_XERS } from './data/demo.js';
 import { closeModal } from './ui/modal.js';
 import { esc } from './ui/components.js';
 import { ViewCommand } from './views/command.js';
@@ -22,6 +23,7 @@ import { ViewTimeline } from './views/timeline.js';
 import { ViewReport } from './views/report.js';
 import { ViewLookahead } from './views/lookahead.js';
 import { ViewRegister } from './views/register.js';
+import { ViewTrend } from './views/trend.js';
 import { ViewGantt } from './views/gantt.js';
 import { ViewChainage } from './views/chainage.js';
 import { ViewSCurve } from './views/scurve.js';
@@ -30,13 +32,14 @@ import { ViewCompare } from './views/compare.js';
 
 const VIEWS = [ViewCommand, ViewWBS, ViewHealth,
   ViewTimeline, ViewReport, ViewLookahead, ViewRegister,
-  ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare];
+  ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare, ViewTrend];
 
 export const store = {
   model: null, modelName: '', baseline: null, baselineName: '',
   scope: null, view: 'command',
   win: { from: 0, to: 0, preset: 'back4w' },
   tlFilter: null,
+  updates: [], // prior update snapshots [{model, name}] for trending
   d: {},
   listeners: new Set(),
   on(fn) { this.listeners.add(fn); },
@@ -57,6 +60,9 @@ export const store = {
       integrity: updateIntegrity(m),
       bands: floatBands(m),
       lpath: longestPath(m),
+      trend: this.updates.length
+        ? buildTrend([...this.updates, { model: m, name: this.modelName }])
+        : null,
     };
   },
 
@@ -126,6 +132,29 @@ export const store = {
   },
   useDemo() { this.loadCurrent(DEMO_XER, DEMO_NAME + ' (demo)'); },
   useDemoBaseline() { this.loadBaseline(BASELINE_XER, BASELINE_NAME + ' (demo)'); },
+  useDemoHistory() {
+    this.updates = HISTORY_XERS.map((u) => ({ model: buildModel(parseXER(u.text)), name: u.name + ' (demo)' }));
+    this.recompute();
+    this.emit();
+  },
+  pickUpdateFiles() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.xer,text/plain';
+    input.multiple = true;
+    input.addEventListener('change', async () => {
+      for (const f of input.files) {
+        try {
+          this.updates.push({ model: buildModel(parseXER(await f.text())), name: f.name });
+        } catch (err) {
+          alert(`Could not parse ${f.name}: ${err.message}`);
+        }
+      }
+      this.recompute();
+      this.emit();
+    });
+    input.click();
+  },
 
   pickFile(kind) {
     const input = document.createElement('input');

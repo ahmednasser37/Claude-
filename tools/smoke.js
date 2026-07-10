@@ -26,7 +26,7 @@ try {
   await page.waitForSelector('.statrow .stat');
 
   // Command view: demo model loaded, KPI row real
-  check(await page.locator('.navitem').count() === 12, 'sidebar lists 12 views');
+  check(await page.locator('.navitem').count() === 13, 'sidebar lists 13 views');
   await page.waitForFunction(() => document.querySelector('[data-count="acts"]')?.textContent === '43');
   check(true, 'Command KPIs count up to 43 activities');
 
@@ -51,6 +51,7 @@ try {
     ['report', '[data-report-text]'], ['lookahead', '[data-hz]'], ['register', '[data-reg-group]'],
     ['gantt', '.taskcard'], ['chainage', '[data-oos]'], ['scurve', 'canvas'],
     ['resource', '[data-oa]'], ['compare', '[data-load-demo-baseline]'],
+    ['trend', '[data-demo-history]'],
   ]) {
     await page.click(`[data-view="${id}"]`);
     await page.waitForSelector(probe, { timeout: 5000 });
@@ -106,6 +107,15 @@ try {
   await page.click('[data-hz="42"]');
   await page.waitForFunction(() => document.querySelector('[data-hz="42"]')?.classList.contains('active'));
   check(true, 'lookahead horizon switches to 6 weeks');
+
+  // update history: demo loads 2 snapshots + current = 3-point trend
+  await page.click('[data-view="trend"]');
+  await page.click('[data-demo-history]');
+  await page.waitForSelector('[data-chart="slip"]');
+  check(await page.locator('[data-chart]').count() === 3, 'trend renders slip, EV/AC and index charts');
+  check(await page.locator('[data-erosion]').count() > 3, 'float erosion table ranks eroded activities');
+  const trendChip = await page.textContent('.header .chip');
+  check(trendChip.includes('3'), 'trend counts 3 updates (2 history + current)');
 
   // WBS scope flow: click row -> modal -> "Set as scope" (never bare click)
   await page.click('[data-view="wbs"]');

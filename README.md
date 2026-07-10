@@ -61,6 +61,14 @@ from/to, ◀ ▶ stepping) drives three views:
   constraints due, and **blocked starts** (planned to start while an FS
   predecessor is unfinished — scheduled ≠ released).
 
+**Update History** (load 2+ successive .xer updates, or the bundled demo
+history) is the one legitimate source of trend data — each snapshot
+contributes exactly one recorded point, never interpolated: the slip chart
+(forecast finish per data date), a real EV/AC/PV history, SPI/CPI/SPI(t)
+trends, float-erosion ranking with sparklines, and window-by-window
+attribution (finish slip, EV/AC accrued, newly-critical activities per
+update period).
+
 Schedule Health additionally runs **update-integrity QA** before you trust
 any metric: out-of-sequence progress (started before the FS predecessor
 actually finished, lag respected), future actual dates, complete-without-
