@@ -114,7 +114,7 @@ function currentActivities() {
     ...SEG('S32', '5032', 518, 524, 65),
     ...SEG('S33', '5033', 524, 530, 110),
     ...SEG('S34', '5034', 530, 536, 155, { weldDur: 46 }), // 46 wd -> DCMA-8 offender
-    { code: 'C-010', name: 'Wadi Hanifa HDD Crossing KP529+800', wbs: '5040', off: 140, dur: 35, preds: [['S33-030', 'PR_FS', -40]], rsrc: [['206', 2500000, 280]], st: 'A', pct: 45, slip: 12, remain: 160, acMult: 0.55, float: 24 }, // lead -> DCMA-2
+    { code: 'C-010', name: 'Wadi Hanifa HDD Crossing KP529+800', wbs: '5040', off: 140, dur: 35, preds: [['S33-030', 'PR_FS', -40]], rsrc: [['206', 2500000, 280]], st: 'A', pct: 45, slip: 0, remain: 160, acMult: 0.55, float: 24 }, // lead -> DCMA-2; starts before pred finish -> OOS progress
     { code: 'C-020', name: 'Pump Station 2 Tie-in KP536+000', wbs: '5040', off: 250, dur: 10, preds: [['S34-070', 'PR_FS', 0]], cstr: ['CS_MEO', 254], rsrc: [['202', 700000, 80]], st: 'N', float: 40 }, // no successor -> DCMA-1; hard constraint -> DCMA-5
     { code: 'C-030', name: 'Cathodic Protection System — Section 2 Mainline', wbs: '5040', off: 235, dur: 25, rsrc: [['207', 900000, 200]], st: 'N', float: 120 }, // no predecessor -> DCMA-1
     { code: 'T-010', name: 'Hydrostatic Test — Section 2 Mainline', wbs: '5050', off: 230, dur: 15, preds: [['S34-060', 'PR_FS', 0], ['S33-070', 'PR_FS', 0], ['S31-070', 'PR_FS', 0], ['S32-070', 'PR_FS', 0], ['C-010', 'PR_FS', 0], ['P-040', 'PR_FS', 0]], rsrc: [['207', 500000, 120]], st: 'N', float: -40 },

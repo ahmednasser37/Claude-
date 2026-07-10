@@ -35,6 +35,33 @@ export const ViewHealth = {
             </tr>`).join('')}
           </tbody>
         </table></div>
+      </div>
+
+      <div class="section">
+        <h2>Update integrity</h2>
+        <p class="sub">Is the latest status update trustworthy? These are recording-quality checks on actual dates and status codes — fix these before believing any metric above.</p>
+        <div class="tablewrap"><table class="ledger">
+          <thead><tr><th>Check</th><th class="num">Findings</th><th>Status</th></tr></thead>
+          <tbody>
+            ${store.d.integrity.map((f, i) => `<tr class="rowlink" data-integ="${i}" tabindex="0">
+              <td>${esc(f.name)}<div style="color:var(--dim-2);font-size:11.5px;max-width:64ch">${esc(f.why)}</div></td>
+              <td class="num">${f.tasks.length}</td>
+              <td>${statusPill(f.tasks.length ? 'fail' : 'pass')}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>
+      </div>
+
+      <div class="section">
+        <h2>Float bands</h2>
+        <p class="sub">The near-critical radar across incomplete work${store.d.bands.unmeasured ? ` (${store.d.bands.unmeasured} with no float in file — not binned, not assumed)` : ''}.</p>
+        <div class="tablewrap"><table class="ledger"><tbody>
+          ${store.d.bands.bands.map((b, i) => `<tr class="rowlink" data-band="${i}" tabindex="0">
+            <td style="width:190px">${esc(b.label)}</td>
+            <td class="num" style="width:56px">${b.tasks.length}</td>
+            <td><span class="bar" style="display:block;max-width:420px"><i style="width:${store.d.bands.bands.some((x) => x.tasks.length) ? (b.tasks.length / Math.max(...store.d.bands.bands.map((x) => x.tasks.length)) * 100).toFixed(0) : 0}%;background:${b.id === 'neg' || b.id === 'crit' ? 'var(--bad)' : b.id === 'near' ? 'var(--warn)' : 'var(--chart-line)'}"></i></span></td>
+          </tr>`).join('')}
+        </tbody></table></div>
       </div>`;
 
     el.querySelectorAll('[data-check]').forEach((tr) => {
@@ -48,6 +75,28 @@ export const ViewHealth = {
             ${c.reason ? `<dt>Note</dt><dd>${esc(c.reason)}</dd>` : ''}
           </dl>
           ${c.offenders && c.offenders.length ? `<h4 style="margin:10px 0 0;font-size:12px;color:var(--dim-2);text-transform:uppercase;letter-spacing:.08em">Offending items</h4>${offenderListHTML(c.offenders, store.model)}` : ''}`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+
+    el.querySelectorAll('[data-integ]').forEach((tr) => {
+      const open = () => {
+        const f = store.d.integrity[+tr.dataset.integ];
+        openModal(f.name, `${f.tasks.length} finding${f.tasks.length === 1 ? '' : 's'}`, `
+          <p>${esc(f.why)}</p>
+          ${f.tasks.length ? offenderListHTML(f.tasks.map((t) => t.id), store.model, 40) : '<p class="sub">Clean.</p>'}`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+
+    el.querySelectorAll('[data-band]').forEach((tr) => {
+      const open = () => {
+        const b = store.d.bands.bands[+tr.dataset.band];
+        openModal(b.label, `${b.tasks.length} incomplete activities`, b.tasks.length
+          ? `<ul class="offender-list">${b.tasks.map((t) => `<li>${esc(t.code)} · ${t.floatDays.toFixed(1)} wd</li>`).join('')}</ul>`
+          : '<p class="sub">None in this band.</p>');
       };
       tr.addEventListener('click', open);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });

@@ -149,6 +149,78 @@ export function ringSVG(pct, color, size = 52) {
   </svg>`;
 }
 
+// ---------- reporting window ----------
+
+export function isoDate(ms) {
+  if (ms === undefined || ms === null) return '';
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+export function parseISO(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : undefined;
+}
+
+export const WIN_PRESETS = [
+  ['back1w', 'Last week'], ['back2w', 'Last 2 wk'], ['back4w', 'Last 4 wk'],
+  ['month', 'This month'], ['next2w', 'Next 2 wk'], ['next4w', 'Next 4 wk'],
+  ['next6w', 'Next 6 wk'], ['full', 'Full plan'],
+];
+
+// One shared control: presets are data-date-relative, plus custom from/to and
+// ◀ ▶ stepping by the window's own length.
+export function windowBarHTML(store) {
+  const w = store.win;
+  return `<div class="winbar">
+    <div class="winpresets">
+      ${WIN_PRESETS.map(([id, label]) => `<button class="winpreset ${w.preset === id ? 'active' : ''}" data-preset="${id}">${label}</button>`).join('')}
+    </div>
+    <div class="winrange">
+      <button class="btn small" data-step="-1" title="Shift window back">◀</button>
+      <input type="date" data-win-from value="${isoDate(w.from)}" aria-label="Window from">
+      <span style="color:var(--dim-2)">→</span>
+      <input type="date" data-win-to value="${isoDate(w.to)}" aria-label="Window to">
+      <button class="btn small" data-step="1" title="Shift window forward">▶</button>
+    </div>
+  </div>`;
+}
+
+export function wireWindowBar(el, store) {
+  el.querySelectorAll('[data-preset]').forEach((b) =>
+    b.addEventListener('click', () => store.setWindowPreset(b.dataset.preset)));
+  el.querySelectorAll('[data-step]').forEach((b) =>
+    b.addEventListener('click', () => store.stepWindow(+b.dataset.step)));
+  const from = el.querySelector('[data-win-from]');
+  const to = el.querySelector('[data-win-to]');
+  const custom = () => {
+    const f = parseISO(from.value), t = parseISO(to.value);
+    if (f !== undefined && t !== undefined && t >= f) store.setWindow(f, t, 'custom');
+  };
+  from.addEventListener('change', custom);
+  to.addEventListener('change', custom);
+}
+
+// ---------- CSV export (planners live in Excel) ----------
+
+export function downloadCSV(filename, headers, rows) {
+  const cell = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const text = [headers, ...rows].map((r) => r.map(cell).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+export function csvButton(label = 'Export CSV') {
+  return `<button class="btn small" data-csv>${label}</button>`;
+}
+
 export function offenderListHTML(offenders, model, cap = 24) {
   if (!offenders || offenders.length === 0) return '<p class="sub" style="color:var(--dim)">No offending items.</p>';
   const names = offenders.slice(0, cap).map((id) => {

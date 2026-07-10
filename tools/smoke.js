@@ -26,7 +26,7 @@ try {
   await page.waitForSelector('.statrow .stat');
 
   // Command view: demo model loaded, KPI row real
-  check(await page.locator('.navitem').count() === 8, 'sidebar lists 8 views');
+  check(await page.locator('.navitem').count() === 11, 'sidebar lists 11 views');
   await page.waitForFunction(() => document.querySelector('[data-count="acts"]')?.textContent === '43');
   check(true, 'Command KPIs count up to 43 activities');
 
@@ -47,9 +47,10 @@ try {
 
   // every view renders without page errors
   for (const [id, probe] of [
-    ['wbs', '.wbsrow'], ['health', '[data-check]'], ['gantt', '.taskcard'],
-    ['chainage', '[data-oos]'], ['scurve', 'canvas'], ['resource', '[data-oa]'],
-    ['compare', '[data-load-demo-baseline]'],
+    ['wbs', '.wbsrow'], ['health', '[data-integ]'], ['timeline', '.winbar'],
+    ['report', '[data-report-text]'], ['lookahead', '[data-hz]'],
+    ['gantt', '.taskcard'], ['chainage', '[data-oos]'], ['scurve', 'canvas'],
+    ['resource', '[data-oa]'], ['compare', '[data-load-demo-baseline]'],
   ]) {
     await page.click(`[data-view="${id}"]`);
     await page.waitForSelector(probe, { timeout: 5000 });
@@ -70,6 +71,31 @@ try {
   await page.click('[data-tab="crit"]');
   await page.waitForSelector('.section');
   check(true, 'compare tabs render from one shared diff');
+
+  // reporting window: preset switch updates the shared window everywhere
+  await page.click('[data-view="timeline"]');
+  await page.waitForSelector('.winbar');
+  await page.click('[data-preset="next4w"]');
+  await page.waitForFunction(() => document.querySelector('[data-preset="next4w"]')?.classList.contains('active'));
+  check(true, 'timeline window preset switches to next 4 weeks');
+  await page.click('[data-view="report"]');
+  await page.waitForFunction(() => document.querySelector('[data-preset="next4w"]')?.classList.contains('active'));
+  check(true, 'period report shares the same reporting window');
+  await page.click('[data-preset="back4w"]');
+  await page.waitForSelector('[data-rep]');
+  check(await page.locator('[data-rep]').count() > 5, 'look-back lists completions and misses');
+  await page.click('[data-report-text]');
+  await page.waitForSelector('[data-report-body]');
+  const reportText = await page.inputValue('[data-report-body]');
+  check(reportText.includes('MISSED FINISHES') && reportText.includes('COMPLETED IN WINDOW'), 'copy-ready report text generated');
+  await page.keyboard.press('Escape');
+
+  // lookahead: blocked starts identified
+  await page.click('[data-view="lookahead"]');
+  await page.waitForSelector('[data-hz]');
+  await page.click('[data-hz="42"]');
+  await page.waitForFunction(() => document.querySelector('[data-hz="42"]')?.classList.contains('active'));
+  check(true, 'lookahead horizon switches to 6 weeks');
 
   // WBS scope flow: click row -> modal -> "Set as scope" (never bare click)
   await page.click('[data-view="wbs"]');

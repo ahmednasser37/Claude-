@@ -9,23 +9,32 @@ import { rollupWBS } from './kernel/wbs.js';
 import { findOutOfSequence } from './kernel/chainage.js';
 import { resourceDemand } from './kernel/resource.js';
 import { compareModels } from './kernel/compare.js';
+import { windowReport, buildLookahead, updateIntegrity, floatBands } from './kernel/period.js';
+import { dayFloor, DAY_MS } from './kernel/calendar.js';
 import { DEMO_XER, BASELINE_XER, DEMO_NAME, BASELINE_NAME } from './data/demo.js';
 import { closeModal } from './ui/modal.js';
 import { esc } from './ui/components.js';
 import { ViewCommand } from './views/command.js';
 import { ViewWBS } from './views/wbs.js';
 import { ViewHealth } from './views/health.js';
+import { ViewTimeline } from './views/timeline.js';
+import { ViewReport } from './views/report.js';
+import { ViewLookahead } from './views/lookahead.js';
 import { ViewGantt } from './views/gantt.js';
 import { ViewChainage } from './views/chainage.js';
 import { ViewSCurve } from './views/scurve.js';
 import { ViewResource } from './views/resource.js';
 import { ViewCompare } from './views/compare.js';
 
-const VIEWS = [ViewCommand, ViewWBS, ViewHealth, ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare];
+const VIEWS = [ViewCommand, ViewWBS, ViewHealth,
+  ViewTimeline, ViewReport, ViewLookahead,
+  ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare];
 
 export const store = {
   model: null, modelName: '', baseline: null, baselineName: '',
   scope: null, view: 'command',
+  win: { from: 0, to: 0, preset: 'back4w' },
+  tlFilter: null,
   d: {},
   listeners: new Set(),
   on(fn) { this.listeners.add(fn); },
@@ -42,13 +51,67 @@ export const store = {
       oos: findOutOfSequence(m),
       demand: resourceDemand(m, 'week'),
       cmp: this.baseline ? compareModels(m, this.baseline) : null,
+      report: windowReport(m, this.win.from, this.win.to),
+      integrity: updateIntegrity(m),
+      bands: floatBands(m),
     };
+  },
+
+  // ---- shared reporting window ----
+  planSpan() {
+    let t0 = Infinity, t1 = 0;
+    for (const t of this.model.tasks) {
+      if (t.targetStart !== undefined) t0 = Math.min(t0, t.targetStart);
+      if (t.targetEnd !== undefined) t1 = Math.max(t1, t.targetEnd);
+      if (t.actEnd !== undefined) t1 = Math.max(t1, t.actEnd);
+    }
+    return [dayFloor(t0), dayFloor(t1)];
+  },
+  setWindow(from, to, preset = 'custom') {
+    this.win = { from: dayFloor(from), to: dayFloor(to), preset };
+    if (this.model) this.d.report = windowReport(this.model, this.win.from, this.win.to);
+    this.emit();
+  },
+  setWindowPreset(preset) {
+    const m = this.model;
+    if (!m) return;
+    const dd = dayFloor(m.dataDate ?? Date.now());
+    const back = (days) => this.setWindow(dd - days * DAY_MS, dd, preset);
+    const fwd = (days) => this.setWindow(dd + DAY_MS, dd + days * DAY_MS, preset);
+    switch (preset) {
+      case 'back1w': return back(7);
+      case 'back2w': return back(14);
+      case 'back4w': return back(28);
+      case 'month': {
+        const d = new Date(dd);
+        return this.setWindow(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1),
+          Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0), preset);
+      }
+      case 'next2w': return fwd(14);
+      case 'next4w': return fwd(28);
+      case 'next6w': return fwd(42);
+      case 'full': {
+        const [a, b] = this.planSpan();
+        return this.setWindow(a, b, preset);
+      }
+    }
+  },
+  stepWindow(dir) {
+    const len = this.win.to - this.win.from + DAY_MS;
+    this.setWindow(this.win.from + dir * len, this.win.to + dir * len, 'custom');
+  },
+  getLookahead(from, to) {
+    return buildLookahead(this.model, from, to);
   },
 
   loadCurrent(text, name) {
     this.model = buildModel(parseXER(text));
     this.modelName = name;
     this.scope = null;
+    this.tlFilter = null;
+    const dd = this.model.dataDate;
+    if (dd !== undefined) this.win = { from: dayFloor(dd) - 28 * DAY_MS, to: dayFloor(dd), preset: 'back4w' };
+    else { const [a, b] = this.planSpan(); this.win = { from: a, to: b, preset: 'full' }; }
     this.recompute();
     this.emit();
   },

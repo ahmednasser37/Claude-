@@ -266,6 +266,37 @@ table.ledger tr.rowlink:hover { background: var(--raised); }
 .ring .rv { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 17px; font-weight: 300; line-height: 1.2; }
 .ring .rl { font-family: var(--mono); font-size: 9.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--dim-2); }
 
+/* ---------- reporting window bar + filters ---------- */
+.winbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap; padding: 8px 0 2px;
+}
+.winpresets { display: flex; flex-wrap: wrap; gap: 4px; }
+.winpreset {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .05em;
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border-soft); color: var(--dim); background: transparent;
+  transition: color .15s, border-color .15s;
+}
+.winpreset:hover { color: var(--text); border-color: var(--border); }
+.winpreset.active {
+  color: var(--accent); border-color: var(--accent);
+  text-shadow: 0 0 10px var(--accent-glow);
+}
+.winrange { display: flex; align-items: center; gap: 6px; }
+.winrange input[type="date"] {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text);
+  background: var(--raised); border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 7px; color-scheme: dark;
+}
+.filterrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 12px; }
+.filterrow input[type="search"], .filterrow select {
+  font-family: var(--mono); font-size: 12px; color: var(--text);
+  background: var(--raised); border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 9px; min-width: 170px;
+}
+.filterrow select { min-width: 130px; }
+
 /* ---------- tabs ---------- */
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
 .tab { padding: 8px 14px; font-family: var(--mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); border-bottom: 2px solid transparent; margin-bottom: -1px; }
@@ -1492,11 +1523,200 @@ function compareModels(current, baseline) {
 }
 
 
+// ---- src/kernel/period.js ----
+// period.js — the reporting-window engine: look-back (what happened in a
+// window), look-ahead (what's coming), and update-integrity QA. Pure.
+//
+// Honesty note: a single XER carries one snapshot, but ACTUAL dates are real
+// history — "completed in window" and "value of completions" are derived
+// from act_start/act_end, never synthesized. What is NOT derivable (per-
+// period earned-value history) is not produced here.
+
+
+const inWin = (ms, from, to) => ms !== undefined && dayFloor(ms) >= dayFloor(from) && dayFloor(ms) <= dayFloor(to);
+
+// Fraction of an activity's planned cost that falls inside [from, to],
+// proportional to its calendar working hours (same rule as the PV spread).
+function plannedCostInWindow(task, from, to) {
+  const cost = task.targetCost || 0;
+  if (cost <= 0 || task.targetStart === undefined || task.targetEnd === undefined) return 0;
+  const a = dayFloor(task.targetStart), b = dayFloor(task.targetEnd);
+  if (b < dayFloor(from) || a > dayFloor(to)) return 0;
+  let total = 0, inside = 0;
+  for (let d = a; d <= b; d += DAY_MS) {
+    const h = hoursOnDay(task.cal, d);
+    total += h;
+    if (d >= dayFloor(from) && d <= dayFloor(to)) inside += h;
+  }
+  if (total === 0) return inWin(a, from, to) ? cost : 0;
+  return cost * (inside / total);
+}
+
+// Look-back report for [from, to].
+function windowReport(model, from, to) {
+  const dd = model.dataDate;
+  const r = {
+    from, to,
+    completed: [],      // act_end in window
+    started: [],        // act_start in window
+    inFlight: [],       // active, overlapping the window, not finished in it
+    missedFinish: [],   // planned to finish in window, still not complete
+    missedStart: [],    // planned to start in window, still not started
+    milestonesHit: [],
+    milestonesMissed: [],
+    valueDone: 0,       // Σ cost of activities completed in window (real actual dates)
+    valuePlanned: 0,    // Σ planned cost falling in window (calendar-spread)
+  };
+  for (const t of model.tasks) {
+    r.valuePlanned += plannedCostInWindow(t, from, to);
+    const done = t.status === 'TK_Complete';
+    if (t.milestone) {
+      if (done && inWin(t.actEnd ?? t.actStart, from, to)) r.milestonesHit.push(t);
+      else if (!done && inWin(t.targetEnd, from, to) && (dd === undefined || dayFloor(t.targetEnd) <= dayFloor(Math.min(to, dd)))) r.milestonesMissed.push(t);
+      // future milestones inside a forward window are neither hit nor missed
+    }
+    if (done && inWin(t.actEnd, from, to)) {
+      r.completed.push(t);
+      r.valueDone += t.targetCost || 0;
+    }
+    if (inWin(t.actStart, from, to)) r.started.push(t);
+    if (t.status === 'TK_Active' && t.actStart !== undefined
+      && dayFloor(t.actStart) <= dayFloor(to)) r.inFlight.push(t);
+    // "missed" is only meaningful for the part of the window that has already
+    // happened — never call future work late.
+    const pastEdge = dd !== undefined ? Math.min(dayFloor(to), dayFloor(dd)) : dayFloor(to);
+    if (!done && !t.milestone && t.targetEnd !== undefined
+      && dayFloor(t.targetEnd) >= dayFloor(from) && dayFloor(t.targetEnd) <= pastEdge) {
+      const slipWd = dd !== undefined ? workingDaysBetween(t.cal, t.targetEnd, dd) : undefined;
+      r.missedFinish.push({ t, slipWd });
+    }
+    if (t.status === 'TK_NotStart' && t.targetStart !== undefined
+      && dayFloor(t.targetStart) >= dayFloor(from) && dayFloor(t.targetStart) <= pastEdge) {
+      const slipWd = dd !== undefined ? workingDaysBetween(t.cal, t.targetStart, dd) : undefined;
+      r.missedStart.push({ t, slipWd });
+    }
+  }
+  const byEnd = (a, b) => (a.actEnd ?? 0) - (b.actEnd ?? 0);
+  r.completed.sort(byEnd);
+  r.started.sort((a, b) => (a.actStart ?? 0) - (b.actStart ?? 0));
+  r.missedFinish.sort((a, b) => (b.slipWd ?? 0) - (a.slipWd ?? 0));
+  r.missedStart.sort((a, b) => (b.slipWd ?? 0) - (a.slipWd ?? 0));
+  return r;
+}
+
+// Look-ahead for (dataDate, dataDate + horizon].
+function buildLookahead(model, from, to) {
+  const r = { from, to, starting: [], finishing: [], constraintsDue: [], blockedStarts: [] };
+  const predsBySucc = new Map();
+  for (const p of model.preds) {
+    if (!predsBySucc.has(p.taskId)) predsBySucc.set(p.taskId, []);
+    predsBySucc.get(p.taskId).push(p);
+  }
+  for (const t of model.tasks) {
+    if (t.status === 'TK_NotStart' && inWin(t.targetStart, from, to)) {
+      r.starting.push(t);
+      // readiness: an FS predecessor not finished, or SS predecessor not
+      // started, means this start is not actually released yet.
+      const blockers = [];
+      for (const p of predsBySucc.get(t.id) || []) {
+        const pred = model.taskById.get(p.predTaskId);
+        if (!pred) continue;
+        if ((p.type === 'PR_FS' || p.type === 'PR_FF') && pred.status !== 'TK_Complete') blockers.push({ pred, rel: p });
+        else if ((p.type === 'PR_SS' || p.type === 'PR_SF') && pred.status === 'TK_NotStart') blockers.push({ pred, rel: p });
+      }
+      if (blockers.length) r.blockedStarts.push({ t, blockers });
+    }
+    if (t.status !== 'TK_Complete' && inWin(t.targetEnd, from, to)) r.finishing.push(t);
+    if (t.cstrType && inWin(t.cstrDate, from, to)) r.constraintsDue.push(t);
+  }
+  const byStart = (a, b) => (a.targetStart ?? 0) - (b.targetStart ?? 0);
+  r.starting.sort(byStart);
+  r.finishing.sort((a, b) => (a.targetEnd ?? 0) - (b.targetEnd ?? 0));
+  return r;
+}
+
+// Update-integrity QA — is this status update trustworthy?
+// Each finding: {id, name, why, tasks: [...]}.
+function updateIntegrity(model) {
+  const dd = model.dataDate;
+  const dayHrs = (t) => t.cal.dayHrs || 8;
+  const findings = [];
+  const add = (id, name, why, tasks) => findings.push({ id, name, why, tasks });
+
+  // 1. out-of-sequence progress: started before an FS predecessor finished
+  //    (respecting the relationship's lag, converted at the task calendar).
+  const oos = [];
+  for (const p of model.preds) {
+    if (p.type !== 'PR_FS') continue;
+    const pred = model.taskById.get(p.predTaskId);
+    const succ = model.taskById.get(p.taskId);
+    if (!pred || !succ || succ.actStart === undefined) continue;
+    const lagDays = (p.lagHrs || 0) / dayHrs(succ);
+    if (pred.status !== 'TK_Complete') { oos.push({ succ, pred }); continue; }
+    if (pred.actEnd !== undefined) {
+      const gapWd = workingDaysBetween(succ.cal, pred.actEnd, succ.actStart);
+      if (gapWd < lagDays) oos.push({ succ, pred });
+    }
+  }
+  add('oos-progress', 'Out-of-sequence progress',
+    'Work reported as started before its Finish-to-Start predecessor actually finished (lag respected). P6 retained-logic scheduling will distort remaining dates around these.',
+    oos.map((x) => x.succ));
+
+  // 2. actual dates in the future
+  add('future-actuals', 'Actual dates after the data date',
+    'An actual date later than the data date is a record of something that has not happened yet.',
+    dd === undefined ? [] : model.tasks.filter((t) =>
+      (t.actStart !== undefined && dayFloor(t.actStart) > dayFloor(dd))
+      || (t.actEnd !== undefined && dayFloor(t.actEnd) > dayFloor(dd))));
+
+  // 3. status/actual mismatches
+  add('complete-no-finish', 'Complete without an actual finish',
+    'TK_Complete but act_end_date is empty — the completion date is unrecorded.',
+    model.tasks.filter((t) => t.status === 'TK_Complete' && t.actEnd === undefined));
+  add('active-no-start', 'In progress without an actual start',
+    'TK_Active but act_start_date is empty — progress with no start on record.',
+    model.tasks.filter((t) => t.status === 'TK_Active' && t.actStart === undefined));
+  add('pct-no-start', 'Physical % without an actual start',
+    'phys_complete_pct > 0 on an activity that has never started.',
+    model.tasks.filter((t) => (t.physPct ?? 0) > 0 && t.actStart === undefined && t.status === 'TK_NotStart'));
+  add('complete-remaining', 'Complete with remaining duration',
+    'TK_Complete but remain_drtn_hr_cnt > 0 — finished work cannot have remaining duration.',
+    model.tasks.filter((t) => t.status === 'TK_Complete' && (t.remainHrs ?? 0) > 0));
+
+  // 4. un-statused work (stale forecasts)
+  add('unstatused', 'Un-statused work (stale forecasts)',
+    'Not-started activities whose planned dates are already in the past — the update did not move or status them.',
+    dd === undefined ? [] : model.tasks.filter((t) =>
+      t.status === 'TK_NotStart' && t.targetStart !== undefined && dayFloor(t.targetStart) < dayFloor(dd)));
+
+  return findings;
+}
+
+// Float bands — the planner's near-critical radar.
+function floatBands(model) {
+  const bands = [
+    { id: 'neg', label: 'Negative float', test: (d) => d < 0, tasks: [] },
+    { id: 'crit', label: 'Critical (0 wd)', test: (d) => d === 0, tasks: [] },
+    { id: 'near', label: 'Near-critical (≤ 5 wd)', test: (d) => d > 0 && d <= 5, tasks: [] },
+    { id: 'mid', label: 'Watch (≤ 20 wd)', test: (d) => d > 5 && d <= 20, tasks: [] },
+    { id: 'high', label: 'High float (> 20 wd)', test: (d) => d > 20, tasks: [] },
+  ];
+  let unmeasured = 0;
+  for (const t of model.tasks) {
+    if (t.status === 'TK_Complete') continue;
+    if (t.floatDays === undefined) { unmeasured++; continue; }
+    for (const b of bands) if (b.test(t.floatDays)) { b.tasks.push(t); break; }
+  }
+  for (const b of bands) b.tasks.sort((a, z) => (a.floatDays ?? 0) - (z.floatDays ?? 0));
+  return { bands, unmeasured };
+}
+
+
 // ---- src/data/demo.js ----
 // GENERATED by tools/make-fixture.js — do not edit by hand.
 const DEMO_NAME = 'najd-s2-update.xer';
 const BASELINE_NAME = 'najd-s2-baseline.xer';
-const DEMO_XER = "ERMHDR\t19.12\t2026-07-01\tProject\tadmin\tPRISM demo export\tdbxDatabaseNoName\tProject Management\tSAR\n%T\tCALENDAR\n%F\tclndr_id\tclndr_name\tday_hr_cnt\tclndr_data\n%R\t100\tNAJD Site — Sun-Thu 8h (KSA)\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|07:00|f|15:00)())))(0||2()((0||0(s|07:00|f|15:00)())))(0||3()((0||0(s|07:00|f|15:00)())))(0||4()((0||0(s|07:00|f|15:00)())))(0||5()((0||0(s|07:00|f|15:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()((0||0(d|45923)())(0||1(d|46100)())(0||2(d|46103)())(0||3(d|46104)())(0||4(d|46099)((0||0(s|07:00|f|11:00)())))))))\n%R\t101\tNAJD Office — Sun-Thu 8h\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|08:00|f|16:00)())))(0||2()((0||0(s|08:00|f|16:00)())))(0||3()((0||0(s|08:00|f|16:00)())))(0||4()((0||0(s|08:00|f|16:00)())))(0||5()((0||0(s|08:00|f|16:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()())))\n%T\tPROJECT\n%F\tproj_id\tproj_short_name\tplan_start_date\tplan_end_date\tlast_recalc_date\tlast_schedule_date\tclndr_id\n%R\t1001\tNAJD-S2\t2025-09-07 07:00\t2026-09-09 15:00\t2025-08-15 08:00\t2026-07-01 07:00\t100\n%T\tPROJWBS\n%F\twbs_id\tparent_wbs_id\twbs_short_name\twbs_name\tproj_node_flag\n%R\t5000\t\tNAJD-S2\tNAJD Water Transmission — Section 2\tY\n%R\t5010\t5000\tGEN\tGeneral & Milestones\tN\n%R\t5020\t5000\tPROC\tProcurement\tN\n%R\t5030\t5000\tPIPE\tPipeline Works\tN\n%R\t5031\t5030\tSEG-A\tSegment A — KP512+000 to KP518+000\tN\n%R\t5032\t5030\tSEG-B\tSegment B — KP518+000 to KP524+000\tN\n%R\t5033\t5030\tSEG-C\tSegment C — KP524+000 to KP530+000\tN\n%R\t5034\t5030\tSEG-D\tSegment D — KP530+000 to KP536+000\tN\n%R\t5040\t5000\tSTX\tStations & Crossings\tN\n%R\t5050\t5000\tTC\tTesting & Commissioning\tN\n%T\tRSRC\n%F\trsrc_id\trsrc_short_name\trsrc_name\trsrc_type\n%R\t201\tEW-CREW\tEarthworks Crew\tRT_Labor\n%R\t202\tWELD-CREW\tWelding & NDT Crew\tRT_Labor\n%R\t203\tSIDEBOOM\tSideboom Spread\tRT_Equip\n%R\t204\tEXCAV\t30t Excavator Fleet\tRT_Equip\n%R\t205\tPIPE-48\tPipe 48in CS API 5L\tRT_Mat\n%R\t206\tHDD-RIG\tHDD Maxi Rig\tRT_Equip\n%R\t207\tQAQC\tQA/QC Engineers\tRT_Labor\n%T\tRSRCRATE\n%F\trsrc_rate_id\trsrc_id\tmax_qty_per_hr\n%R\t301\t201\t2\n%R\t302\t202\t2\n%R\t303\t203\t1\n%R\t304\t206\t1\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10001\tA-000\tNotice to Proceed\t5010\t1001\tTT_Mile\tTK_Complete\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 15:00\t\t0\t100\t\t\t100\n%R\t10002\tA-010\tMobilization & Temporary Works\t5010\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2025-10-05 15:00\t2025-09-07 07:00\t2025-10-05 15:00\t\t0\t100\t\t\t100\n%R\t10003\tA-020\tSite Facilities & Access Roads\t5010\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-11-16 15:00\t2025-10-06 07:00\t2025-11-16 15:00\t\t0\t100\t\t\t100\n%R\t10004\tP-010\tPipe Mill Order & Manufacture\t5020\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2026-02-08 15:00\t2025-09-07 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t101\n%R\t10005\tP-020\tPipe Delivery Lot 1 — Segments A and B\t5020\t1001\tTT_Task\tTK_Complete\t2026-01-12 07:00\t2026-02-01 15:00\t2026-01-12 07:00\t2026-02-01 15:00\t\t0\t100\t\t\t101\n%R\t10006\tP-030\tPipe Delivery Lot 2 — Segments C and D\t5020\t1001\tTT_Task\tTK_Active\t2026-05-07 07:00\t2026-05-27 15:00\t2026-06-18 07:00\t\t160\t48\t60\t\t\t101\n%R\t10007\tP-040\tValves & Fittings Procurement\t5020\t1001\tTT_Task\tTK_NotStart\t2026-06-18 07:00\t2026-07-15 15:00\t\t\t480\t160\t\t\t\t101\n%R\t10008\tS31-010\tSurvey & Set-out KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-10-12 15:00\t2025-10-06 07:00\t2025-10-12 15:00\t\t0\t100\t\t\t100\n%R\t10009\tS31-020\tROW Clearing & Grading KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-13 07:00\t2025-10-28 15:00\t2025-10-13 07:00\t2025-10-28 15:00\t\t0\t100\t\t\t100\n%R\t10010\tS31-030\tTrench Excavation KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-29 07:00\t2025-12-02 15:00\t2025-10-29 07:00\t2025-12-02 15:00\t\t0\t100\t\t\t100\n%R\t10011\tS31-040\tPipe Stringing KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-05 07:00\t2025-11-18 15:00\t2025-11-05 07:00\t2025-11-18 15:00\t\t0\t100\t\t\t100\n%R\t10012\tS31-050\tWelding & NDT KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-19 07:00\t2025-12-30 15:00\t2025-11-19 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10013\tS31-060\tLower-in & Backfill KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-01-25 15:00\t2025-12-31 07:00\t2026-01-25 15:00\t\t0\t100\t\t\t100\n%R\t10014\tS31-070\tReinstatement KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2026-01-26 07:00\t2026-02-08 15:00\t2026-01-26 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t100\n%R\t10015\tS32-010\tSurvey & Set-out KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-08 07:00\t2025-12-14 15:00\t2025-12-08 07:00\t2025-12-14 15:00\t\t0\t100\t\t\t100\n%R\t10016\tS32-020\tROW Clearing & Grading KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-15 07:00\t2025-12-30 15:00\t2025-12-15 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10017\tS32-030\tTrench Excavation KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-02-03 15:00\t2025-12-31 07:00\t2026-02-03 15:00\t\t0\t100\t\t\t100\n%R\t10018\tS32-040\tPipe Stringing KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-07 07:00\t2026-01-20 15:00\t2026-01-07 07:00\t2026-01-20 15:00\t\t0\t100\t\t\t100\n%R\t10019\tS32-050\tWelding & NDT KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-21 07:00\t2026-03-03 15:00\t2026-01-21 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10020\tS32-060\tLower-in & Backfill KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-01 15:00\t2026-03-04 07:00\t2026-04-01 15:00\t\t0\t100\t\t\t100\n%R\t10021\tS32-070\tReinstatement KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-04-02 07:00\t2026-04-15 15:00\t2026-04-02 07:00\t2026-04-15 15:00\t\t0\t100\t\t\t100\n%R\t10022\tS33-010\tSurvey & Set-out KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-09 07:00\t2026-02-15 15:00\t2026-02-09 07:00\t2026-02-15 15:00\t\t0\t100\t\t\t100\n%T\tTASKPRED\n%F\ttask_pred_id\ttask_id\tpred_task_id\tpred_type\tlag_hr_cnt\n%R\t20001\t10002\t10001\tPR_FS\t0\n%R\t20002\t10003\t10002\tPR_FS\t0\n%R\t20003\t10004\t10001\tPR_FS\t0\n%R\t20004\t10005\t10004\tPR_FF\t80\n%R\t20005\t10006\t10004\tPR_FS\t0\n%R\t20006\t10007\t10004\tPR_FS\t0\n%R\t20007\t10008\t10003\tPR_FS\t0\n%R\t20008\t10009\t10008\tPR_FS\t0\n%R\t20009\t10010\t10009\tPR_FS\t0\n%R\t20010\t10011\t10010\tPR_SS\t40\n%R\t20011\t10011\t10005\tPR_FS\t0\n%R\t20012\t10012\t10011\tPR_FS\t0\n%R\t20013\t10013\t10012\tPR_FS\t0\n%R\t20014\t10014\t10013\tPR_FS\t0\n%R\t20015\t10015\t10009\tPR_FS\t0\n%R\t20016\t10016\t10015\tPR_FS\t0\n%R\t20017\t10017\t10016\tPR_FS\t0\n%R\t20018\t10018\t10017\tPR_SS\t40\n%R\t20019\t10019\t10018\tPR_FS\t0\n%R\t20020\t10020\t10019\tPR_FS\t0\n%R\t20021\t10021\t10020\tPR_FS\t0\n%R\t20022\t10022\t10016\tPR_FS\t0\n%R\t20023\t10023\t10022\tPR_FS\t0\n%R\t20024\t10024\t10023\tPR_FS\t0\n%R\t20025\t10025\t10024\tPR_SS\t40\n%R\t20026\t10026\t10025\tPR_FS\t0\n%R\t20027\t10027\t10026\tPR_FS\t0\n%R\t20028\t10028\t10027\tPR_FS\t0\n%R\t20029\t10029\t10023\tPR_FS\t0\n%R\t20030\t10030\t10029\tPR_FS\t0\n%R\t20031\t10031\t10030\tPR_FS\t0\n%R\t20032\t10032\t10031\tPR_SS\t40\n%R\t20033\t10032\t10006\tPR_FS\t0\n%R\t20034\t10033\t10032\tPR_FS\t0\n%R\t20035\t10034\t10033\tPR_FS\t0\n%R\t20036\t10035\t10034\tPR_FS\t0\n%R\t20037\t10036\t10024\tPR_FS\t-40\n%R\t20038\t10037\t10035\tPR_FS\t0\n%R\t20039\t10039\t10034\tPR_FS\t0\n%R\t20040\t10039\t10028\tPR_FS\t0\n%R\t20041\t10039\t10014\tPR_FS\t0\n%R\t20042\t10039\t10021\tPR_FS\t0\n%R\t20043\t10039\t10036\tPR_FS\t0\n%R\t20044\t10039\t10007\tPR_FS\t0\n%R\t20045\t10040\t10026\tPR_FS\t0\n%R\t20046\t10041\t10039\tPR_FS\t0\n%R\t20047\t10041\t10040\tPR_FS\t0\n%R\t20048\t10042\t10041\tPR_FS\t0\n%R\t20049\t10042\t10038\tPR_FS\t0\n%R\t20050\t10043\t10042\tPR_FS\t80\n%T\tTASKRSRC\n%F\ttaskrsrc_id\ttask_id\trsrc_id\ttarget_cost\ttarget_qty\tact_reg_cost\tact_ot_cost\tact_reg_qty\tact_ot_qty\tremain_qty\n%R\t30001\t10002\t201\t1500000\t160\t1551000\t99000\t160\t\t0\n%R\t30002\t10003\t204\t1200000\t240\t1184400\t75600\t240\t\t0\n%R\t30003\t10004\t205\t2000000\t0\t1917600\t122400\t\t\t0\n%R\t30004\t10005\t205\t800000\t0\t752000\t48000\t\t\t0\n%R\t30005\t10006\t205\t800000\t0\t466240\t29760\t\t\t0\n%R\t30006\t10007\t207\t600000\t0\t\t\t\t\t0\n%R\t30007\t10008\t207\t120000\t40\t121824\t7776\t40\t\t0\n%R\t30008\t10009\t201\t300000\t96\t304560\t19440\t96\t\t0\n%R\t30009\t10009\t204\t150000\t96\t152280\t9720\t96\t\t0\n%R\t30010\t10010\t201\t800000\t200\t812160\t51840\t200\t\t0\n%R\t30011\t10010\t204\t600000\t200\t609120\t38880\t200\t\t0\n%R\t30012\t10011\t203\t600000\t80\t609120\t38880\t80\t\t0\n%R\t30013\t10011\t205\t3200000\t6000\t3248640\t207360\t6000\t\t0\n%R\t30014\t10012\t202\t1800000\t240\t1827360\t116640\t240\t\t0\n%R\t30015\t10013\t203\t500000\t144\t507600\t32400\t144\t\t0\n%R\t30016\t10013\t201\t400000\t144\t406080\t25920\t144\t\t0\n%R\t30017\t10014\t201\t400000\t80\t406080\t25920\t80\t\t0\n%R\t30018\t10015\t207\t120000\t40\t126336\t8064\t40\t\t0\n%R\t30019\t10016\t201\t300000\t96\t315840\t20160\t96\t\t0\n%R\t30020\t10016\t204\t150000\t96\t157920\t10080\t96\t\t0\n%R\t30021\t10017\t201\t800000\t200\t842240\t53760\t200\t\t0\n%R\t30022\t10017\t204\t600000\t200\t631680\t40320\t200\t\t0\n%R\t30023\t10018\t203\t600000\t80\t631680\t40320\t80\t\t0\n%R\t30024\t10018\t205\t3200000\t6000\t3368960\t215040\t6000\t\t0\n%R\t30025\t10019\t202\t1800000\t240\t1895040\t120960\t240\t\t0\n%R\t30026\t10020\t203\t500000\t144\t526400\t33600\t144\t\t0\n%R\t30027\t10020\t201\t400000\t144\t421120\t26880\t144\t\t0\n%R\t30028\t10021\t201\t400000\t80\t421120\t26880\t80\t\t0\n%R\t30029\t10022\t207\t120000\t40\t122952\t7848\t40\t\t0\n%R\t30030\t10023\t201\t300000\t96\t307380\t19620\t96\t\t0\n%R\t30031\t10023\t204\t150000\t96\t153690\t9810\t96\t\t0\n%R\t30032\t10024\t201\t800000\t200\t819680\t52320\t200\t\t0\n%R\t30033\t10024\t204\t600000\t200\t614760\t39240\t200\t\t0\n%R\t30034\t10025\t203\t600000\t80\t614760\t39240\t80\t\t0\n%R\t30035\t10025\t205\t3200000\t6000\t3278720\t209280\t6000\t\t0\n%R\t30036\t10026\t202\t1800000\t240\t963636\t61509\t137\t\t103\n%R\t30037\t10027\t203\t500000\t144\t\t\t\t\t144\n%R\t30038\t10027\t201\t400000\t144\t\t\t\t\t144\n%R\t30039\t10028\t201\t400000\t80\t\t\t\t\t80\n%R\t30040\t10029\t207\t120000\t40\t119568\t7632\t40\t\t0\n%R\t30041\t10030\t201\t300000\t96\t85192\t5438\t29\t\t67\n%R\t30042\t10030\t204\t150000\t96\t42596\t2719\t29\t\t67\n%R\t30043\t10031\t201\t800000\t200\t\t\t\t\t200\n%R\t30044\t10031\t204\t600000\t200\t\t\t\t\t200\n%R\t30045\t10032\t203\t600000\t80\t\t\t\t\t80\n%R\t30046\t10032\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30047\t10033\t202\t1800000\t368\t\t\t\t\t368\n%R\t30048\t10034\t203\t500000\t144\t\t\t\t\t144\n%R\t30049\t10034\t201\t400000\t144\t\t\t\t\t144\n%R\t30050\t10035\t201\t400000\t80\t\t\t\t\t80\n%R\t30051\t10036\t206\t2500000\t280\t1292500\t82500\t154\t\t126\n%R\t30052\t10037\t202\t700000\t80\t\t\t\t\t80\n%R\t30053\t10038\t207\t900000\t200\t\t\t\t\t200\n%R\t30054\t10039\t207\t500000\t120\t\t\t\t\t120\n%R\t30055\t10040\t202\t300000\t40\t\t\t\t\t40\n%R\t30056\t10041\t207\t400000\t96\t\t\t\t\t96\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10023\tS33-020\tROW Clearing & Grading KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-16 07:00\t2026-03-03 15:00\t2026-02-16 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10024\tS33-030\tTrench Excavation KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-12 15:00\t2026-03-04 07:00\t2026-04-12 15:00\t\t0\t100\t\t\t100\n%R\t10025\tS33-040\tPipe Stringing KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-11 07:00\t2026-03-29 15:00\t2026-03-11 07:00\t2026-03-29 15:00\t\t0\t100\t\t\t100\n%R\t10026\tS33-050\tWelding & NDT KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Active\t2026-03-30 07:00\t2026-05-10 15:00\t2026-04-09 07:00\t\t0\t120\t55\t\t\t100\n%R\t10027\tS33-060\tLower-in & Backfill KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-03 15:00\t\t\t0\t144\t\t\t\t100\n%R\t10028\tS33-070\tReinstatement KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-06-04 07:00\t2026-06-17 15:00\t\t\t40\t80\t\t\t\t100\n%R\t10029\tS34-010\tSurvey & Set-out KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Complete\t2026-04-16 07:00\t2026-04-22 15:00\t2026-04-16 07:00\t2026-04-22 15:00\t\t0\t100\t\t\t100\n%R\t10030\tS34-020\tROW Clearing & Grading KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Active\t2026-04-23 07:00\t2026-05-10 15:00\t2026-05-07 07:00\t\t-40\t80\t30\t\t\t100\n%R\t10031\tS34-030\tTrench Excavation KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-14 15:00\t\t\t-40\t200\t\t\t\t100\n%R\t10032\tS34-040\tPipe Stringing KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-18 07:00\t2026-05-31 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10033\tS34-050\tWelding & NDT KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-06-01 07:00\t2026-08-03 15:00\t\t\t-40\t368\t\t\t\t100\n%R\t10034\tS34-060\tLower-in & Backfill KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-07-13 07:00\t2026-08-05 15:00\t\t\t-40\t144\t\t\t\t100\n%R\t10035\tS34-070\tReinstatement KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-08-19 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10036\tC-010\tWadi Hanifa HDD Crossing KP529+800\t5040\t1001\tTT_Task\tTK_Active\t2026-03-26 07:00\t2026-05-13 15:00\t2026-04-13 07:00\t\t24\t160\t45\t\t\t100\n%R\t10037\tC-020\tPump Station 2 Tie-in KP536+000\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-27 07:00\t2026-09-09 15:00\t\t\t40\t80\t\tCS_MEO\t2026-09-02 15:00\t100\n%R\t10038\tC-030\tCathodic Protection System — Section 2 Mainline\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-09-09 15:00\t\t\t120\t200\t\t\t\t100\n%R\t10039\tT-010\tHydrostatic Test — Section 2 Mainline\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-30 07:00\t2026-08-19 15:00\t\t\t-40\t120\t\t\t\t100\n%R\t10040\tT-020\tGolden Weld Tie-in KP518+400\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-08-27 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10041\tT-030\tPre-commissioning & Dewatering\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-09-07 15:00\t\t\t-40\t96\t\t\t\t100\n%R\t10042\tM-100\tSection 2 Mechanical Completion\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\tCS_MANDFIN\t2026-09-01 15:00\t100\n%R\t10043\tM-110\tHandover to Operations\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\t\t\t100\n%E\n";
+const DEMO_XER = "ERMHDR\t19.12\t2026-07-01\tProject\tadmin\tPRISM demo export\tdbxDatabaseNoName\tProject Management\tSAR\n%T\tCALENDAR\n%F\tclndr_id\tclndr_name\tday_hr_cnt\tclndr_data\n%R\t100\tNAJD Site — Sun-Thu 8h (KSA)\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|07:00|f|15:00)())))(0||2()((0||0(s|07:00|f|15:00)())))(0||3()((0||0(s|07:00|f|15:00)())))(0||4()((0||0(s|07:00|f|15:00)())))(0||5()((0||0(s|07:00|f|15:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()((0||0(d|45923)())(0||1(d|46100)())(0||2(d|46103)())(0||3(d|46104)())(0||4(d|46099)((0||0(s|07:00|f|11:00)())))))))\n%R\t101\tNAJD Office — Sun-Thu 8h\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|08:00|f|16:00)())))(0||2()((0||0(s|08:00|f|16:00)())))(0||3()((0||0(s|08:00|f|16:00)())))(0||4()((0||0(s|08:00|f|16:00)())))(0||5()((0||0(s|08:00|f|16:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()())))\n%T\tPROJECT\n%F\tproj_id\tproj_short_name\tplan_start_date\tplan_end_date\tlast_recalc_date\tlast_schedule_date\tclndr_id\n%R\t1001\tNAJD-S2\t2025-09-07 07:00\t2026-09-09 15:00\t2025-08-15 08:00\t2026-07-01 07:00\t100\n%T\tPROJWBS\n%F\twbs_id\tparent_wbs_id\twbs_short_name\twbs_name\tproj_node_flag\n%R\t5000\t\tNAJD-S2\tNAJD Water Transmission — Section 2\tY\n%R\t5010\t5000\tGEN\tGeneral & Milestones\tN\n%R\t5020\t5000\tPROC\tProcurement\tN\n%R\t5030\t5000\tPIPE\tPipeline Works\tN\n%R\t5031\t5030\tSEG-A\tSegment A — KP512+000 to KP518+000\tN\n%R\t5032\t5030\tSEG-B\tSegment B — KP518+000 to KP524+000\tN\n%R\t5033\t5030\tSEG-C\tSegment C — KP524+000 to KP530+000\tN\n%R\t5034\t5030\tSEG-D\tSegment D — KP530+000 to KP536+000\tN\n%R\t5040\t5000\tSTX\tStations & Crossings\tN\n%R\t5050\t5000\tTC\tTesting & Commissioning\tN\n%T\tRSRC\n%F\trsrc_id\trsrc_short_name\trsrc_name\trsrc_type\n%R\t201\tEW-CREW\tEarthworks Crew\tRT_Labor\n%R\t202\tWELD-CREW\tWelding & NDT Crew\tRT_Labor\n%R\t203\tSIDEBOOM\tSideboom Spread\tRT_Equip\n%R\t204\tEXCAV\t30t Excavator Fleet\tRT_Equip\n%R\t205\tPIPE-48\tPipe 48in CS API 5L\tRT_Mat\n%R\t206\tHDD-RIG\tHDD Maxi Rig\tRT_Equip\n%R\t207\tQAQC\tQA/QC Engineers\tRT_Labor\n%T\tRSRCRATE\n%F\trsrc_rate_id\trsrc_id\tmax_qty_per_hr\n%R\t301\t201\t2\n%R\t302\t202\t2\n%R\t303\t203\t1\n%R\t304\t206\t1\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10001\tA-000\tNotice to Proceed\t5010\t1001\tTT_Mile\tTK_Complete\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 15:00\t\t0\t100\t\t\t100\n%R\t10002\tA-010\tMobilization & Temporary Works\t5010\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2025-10-05 15:00\t2025-09-07 07:00\t2025-10-05 15:00\t\t0\t100\t\t\t100\n%R\t10003\tA-020\tSite Facilities & Access Roads\t5010\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-11-16 15:00\t2025-10-06 07:00\t2025-11-16 15:00\t\t0\t100\t\t\t100\n%R\t10004\tP-010\tPipe Mill Order & Manufacture\t5020\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2026-02-08 15:00\t2025-09-07 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t101\n%R\t10005\tP-020\tPipe Delivery Lot 1 — Segments A and B\t5020\t1001\tTT_Task\tTK_Complete\t2026-01-12 07:00\t2026-02-01 15:00\t2026-01-12 07:00\t2026-02-01 15:00\t\t0\t100\t\t\t101\n%R\t10006\tP-030\tPipe Delivery Lot 2 — Segments C and D\t5020\t1001\tTT_Task\tTK_Active\t2026-05-07 07:00\t2026-05-27 15:00\t2026-06-18 07:00\t\t160\t48\t60\t\t\t101\n%R\t10007\tP-040\tValves & Fittings Procurement\t5020\t1001\tTT_Task\tTK_NotStart\t2026-06-18 07:00\t2026-07-15 15:00\t\t\t480\t160\t\t\t\t101\n%R\t10008\tS31-010\tSurvey & Set-out KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-10-12 15:00\t2025-10-06 07:00\t2025-10-12 15:00\t\t0\t100\t\t\t100\n%R\t10009\tS31-020\tROW Clearing & Grading KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-13 07:00\t2025-10-28 15:00\t2025-10-13 07:00\t2025-10-28 15:00\t\t0\t100\t\t\t100\n%R\t10010\tS31-030\tTrench Excavation KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-29 07:00\t2025-12-02 15:00\t2025-10-29 07:00\t2025-12-02 15:00\t\t0\t100\t\t\t100\n%R\t10011\tS31-040\tPipe Stringing KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-05 07:00\t2025-11-18 15:00\t2025-11-05 07:00\t2025-11-18 15:00\t\t0\t100\t\t\t100\n%R\t10012\tS31-050\tWelding & NDT KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-19 07:00\t2025-12-30 15:00\t2025-11-19 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10013\tS31-060\tLower-in & Backfill KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-01-25 15:00\t2025-12-31 07:00\t2026-01-25 15:00\t\t0\t100\t\t\t100\n%R\t10014\tS31-070\tReinstatement KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2026-01-26 07:00\t2026-02-08 15:00\t2026-01-26 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t100\n%R\t10015\tS32-010\tSurvey & Set-out KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-08 07:00\t2025-12-14 15:00\t2025-12-08 07:00\t2025-12-14 15:00\t\t0\t100\t\t\t100\n%R\t10016\tS32-020\tROW Clearing & Grading KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-15 07:00\t2025-12-30 15:00\t2025-12-15 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10017\tS32-030\tTrench Excavation KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-02-03 15:00\t2025-12-31 07:00\t2026-02-03 15:00\t\t0\t100\t\t\t100\n%R\t10018\tS32-040\tPipe Stringing KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-07 07:00\t2026-01-20 15:00\t2026-01-07 07:00\t2026-01-20 15:00\t\t0\t100\t\t\t100\n%R\t10019\tS32-050\tWelding & NDT KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-21 07:00\t2026-03-03 15:00\t2026-01-21 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10020\tS32-060\tLower-in & Backfill KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-01 15:00\t2026-03-04 07:00\t2026-04-01 15:00\t\t0\t100\t\t\t100\n%R\t10021\tS32-070\tReinstatement KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-04-02 07:00\t2026-04-15 15:00\t2026-04-02 07:00\t2026-04-15 15:00\t\t0\t100\t\t\t100\n%R\t10022\tS33-010\tSurvey & Set-out KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-09 07:00\t2026-02-15 15:00\t2026-02-09 07:00\t2026-02-15 15:00\t\t0\t100\t\t\t100\n%T\tTASKPRED\n%F\ttask_pred_id\ttask_id\tpred_task_id\tpred_type\tlag_hr_cnt\n%R\t20001\t10002\t10001\tPR_FS\t0\n%R\t20002\t10003\t10002\tPR_FS\t0\n%R\t20003\t10004\t10001\tPR_FS\t0\n%R\t20004\t10005\t10004\tPR_FF\t80\n%R\t20005\t10006\t10004\tPR_FS\t0\n%R\t20006\t10007\t10004\tPR_FS\t0\n%R\t20007\t10008\t10003\tPR_FS\t0\n%R\t20008\t10009\t10008\tPR_FS\t0\n%R\t20009\t10010\t10009\tPR_FS\t0\n%R\t20010\t10011\t10010\tPR_SS\t40\n%R\t20011\t10011\t10005\tPR_FS\t0\n%R\t20012\t10012\t10011\tPR_FS\t0\n%R\t20013\t10013\t10012\tPR_FS\t0\n%R\t20014\t10014\t10013\tPR_FS\t0\n%R\t20015\t10015\t10009\tPR_FS\t0\n%R\t20016\t10016\t10015\tPR_FS\t0\n%R\t20017\t10017\t10016\tPR_FS\t0\n%R\t20018\t10018\t10017\tPR_SS\t40\n%R\t20019\t10019\t10018\tPR_FS\t0\n%R\t20020\t10020\t10019\tPR_FS\t0\n%R\t20021\t10021\t10020\tPR_FS\t0\n%R\t20022\t10022\t10016\tPR_FS\t0\n%R\t20023\t10023\t10022\tPR_FS\t0\n%R\t20024\t10024\t10023\tPR_FS\t0\n%R\t20025\t10025\t10024\tPR_SS\t40\n%R\t20026\t10026\t10025\tPR_FS\t0\n%R\t20027\t10027\t10026\tPR_FS\t0\n%R\t20028\t10028\t10027\tPR_FS\t0\n%R\t20029\t10029\t10023\tPR_FS\t0\n%R\t20030\t10030\t10029\tPR_FS\t0\n%R\t20031\t10031\t10030\tPR_FS\t0\n%R\t20032\t10032\t10031\tPR_SS\t40\n%R\t20033\t10032\t10006\tPR_FS\t0\n%R\t20034\t10033\t10032\tPR_FS\t0\n%R\t20035\t10034\t10033\tPR_FS\t0\n%R\t20036\t10035\t10034\tPR_FS\t0\n%R\t20037\t10036\t10024\tPR_FS\t-40\n%R\t20038\t10037\t10035\tPR_FS\t0\n%R\t20039\t10039\t10034\tPR_FS\t0\n%R\t20040\t10039\t10028\tPR_FS\t0\n%R\t20041\t10039\t10014\tPR_FS\t0\n%R\t20042\t10039\t10021\tPR_FS\t0\n%R\t20043\t10039\t10036\tPR_FS\t0\n%R\t20044\t10039\t10007\tPR_FS\t0\n%R\t20045\t10040\t10026\tPR_FS\t0\n%R\t20046\t10041\t10039\tPR_FS\t0\n%R\t20047\t10041\t10040\tPR_FS\t0\n%R\t20048\t10042\t10041\tPR_FS\t0\n%R\t20049\t10042\t10038\tPR_FS\t0\n%R\t20050\t10043\t10042\tPR_FS\t80\n%T\tTASKRSRC\n%F\ttaskrsrc_id\ttask_id\trsrc_id\ttarget_cost\ttarget_qty\tact_reg_cost\tact_ot_cost\tact_reg_qty\tact_ot_qty\tremain_qty\n%R\t30001\t10002\t201\t1500000\t160\t1551000\t99000\t160\t\t0\n%R\t30002\t10003\t204\t1200000\t240\t1184400\t75600\t240\t\t0\n%R\t30003\t10004\t205\t2000000\t0\t1917600\t122400\t\t\t0\n%R\t30004\t10005\t205\t800000\t0\t752000\t48000\t\t\t0\n%R\t30005\t10006\t205\t800000\t0\t466240\t29760\t\t\t0\n%R\t30006\t10007\t207\t600000\t0\t\t\t\t\t0\n%R\t30007\t10008\t207\t120000\t40\t121824\t7776\t40\t\t0\n%R\t30008\t10009\t201\t300000\t96\t304560\t19440\t96\t\t0\n%R\t30009\t10009\t204\t150000\t96\t152280\t9720\t96\t\t0\n%R\t30010\t10010\t201\t800000\t200\t812160\t51840\t200\t\t0\n%R\t30011\t10010\t204\t600000\t200\t609120\t38880\t200\t\t0\n%R\t30012\t10011\t203\t600000\t80\t609120\t38880\t80\t\t0\n%R\t30013\t10011\t205\t3200000\t6000\t3248640\t207360\t6000\t\t0\n%R\t30014\t10012\t202\t1800000\t240\t1827360\t116640\t240\t\t0\n%R\t30015\t10013\t203\t500000\t144\t507600\t32400\t144\t\t0\n%R\t30016\t10013\t201\t400000\t144\t406080\t25920\t144\t\t0\n%R\t30017\t10014\t201\t400000\t80\t406080\t25920\t80\t\t0\n%R\t30018\t10015\t207\t120000\t40\t126336\t8064\t40\t\t0\n%R\t30019\t10016\t201\t300000\t96\t315840\t20160\t96\t\t0\n%R\t30020\t10016\t204\t150000\t96\t157920\t10080\t96\t\t0\n%R\t30021\t10017\t201\t800000\t200\t842240\t53760\t200\t\t0\n%R\t30022\t10017\t204\t600000\t200\t631680\t40320\t200\t\t0\n%R\t30023\t10018\t203\t600000\t80\t631680\t40320\t80\t\t0\n%R\t30024\t10018\t205\t3200000\t6000\t3368960\t215040\t6000\t\t0\n%R\t30025\t10019\t202\t1800000\t240\t1895040\t120960\t240\t\t0\n%R\t30026\t10020\t203\t500000\t144\t526400\t33600\t144\t\t0\n%R\t30027\t10020\t201\t400000\t144\t421120\t26880\t144\t\t0\n%R\t30028\t10021\t201\t400000\t80\t421120\t26880\t80\t\t0\n%R\t30029\t10022\t207\t120000\t40\t122952\t7848\t40\t\t0\n%R\t30030\t10023\t201\t300000\t96\t307380\t19620\t96\t\t0\n%R\t30031\t10023\t204\t150000\t96\t153690\t9810\t96\t\t0\n%R\t30032\t10024\t201\t800000\t200\t819680\t52320\t200\t\t0\n%R\t30033\t10024\t204\t600000\t200\t614760\t39240\t200\t\t0\n%R\t30034\t10025\t203\t600000\t80\t614760\t39240\t80\t\t0\n%R\t30035\t10025\t205\t3200000\t6000\t3278720\t209280\t6000\t\t0\n%R\t30036\t10026\t202\t1800000\t240\t963636\t61509\t137\t\t103\n%R\t30037\t10027\t203\t500000\t144\t\t\t\t\t144\n%R\t30038\t10027\t201\t400000\t144\t\t\t\t\t144\n%R\t30039\t10028\t201\t400000\t80\t\t\t\t\t80\n%R\t30040\t10029\t207\t120000\t40\t119568\t7632\t40\t\t0\n%R\t30041\t10030\t201\t300000\t96\t85192\t5438\t29\t\t67\n%R\t30042\t10030\t204\t150000\t96\t42596\t2719\t29\t\t67\n%R\t30043\t10031\t201\t800000\t200\t\t\t\t\t200\n%R\t30044\t10031\t204\t600000\t200\t\t\t\t\t200\n%R\t30045\t10032\t203\t600000\t80\t\t\t\t\t80\n%R\t30046\t10032\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30047\t10033\t202\t1800000\t368\t\t\t\t\t368\n%R\t30048\t10034\t203\t500000\t144\t\t\t\t\t144\n%R\t30049\t10034\t201\t400000\t144\t\t\t\t\t144\n%R\t30050\t10035\t201\t400000\t80\t\t\t\t\t80\n%R\t30051\t10036\t206\t2500000\t280\t1292500\t82500\t154\t\t126\n%R\t30052\t10037\t202\t700000\t80\t\t\t\t\t80\n%R\t30053\t10038\t207\t900000\t200\t\t\t\t\t200\n%R\t30054\t10039\t207\t500000\t120\t\t\t\t\t120\n%R\t30055\t10040\t202\t300000\t40\t\t\t\t\t40\n%R\t30056\t10041\t207\t400000\t96\t\t\t\t\t96\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10023\tS33-020\tROW Clearing & Grading KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-16 07:00\t2026-03-03 15:00\t2026-02-16 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10024\tS33-030\tTrench Excavation KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-12 15:00\t2026-03-04 07:00\t2026-04-12 15:00\t\t0\t100\t\t\t100\n%R\t10025\tS33-040\tPipe Stringing KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-11 07:00\t2026-03-29 15:00\t2026-03-11 07:00\t2026-03-29 15:00\t\t0\t100\t\t\t100\n%R\t10026\tS33-050\tWelding & NDT KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Active\t2026-03-30 07:00\t2026-05-10 15:00\t2026-04-09 07:00\t\t0\t120\t55\t\t\t100\n%R\t10027\tS33-060\tLower-in & Backfill KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-03 15:00\t\t\t0\t144\t\t\t\t100\n%R\t10028\tS33-070\tReinstatement KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-06-04 07:00\t2026-06-17 15:00\t\t\t40\t80\t\t\t\t100\n%R\t10029\tS34-010\tSurvey & Set-out KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Complete\t2026-04-16 07:00\t2026-04-22 15:00\t2026-04-16 07:00\t2026-04-22 15:00\t\t0\t100\t\t\t100\n%R\t10030\tS34-020\tROW Clearing & Grading KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Active\t2026-04-23 07:00\t2026-05-10 15:00\t2026-05-07 07:00\t\t-40\t80\t30\t\t\t100\n%R\t10031\tS34-030\tTrench Excavation KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-14 15:00\t\t\t-40\t200\t\t\t\t100\n%R\t10032\tS34-040\tPipe Stringing KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-18 07:00\t2026-05-31 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10033\tS34-050\tWelding & NDT KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-06-01 07:00\t2026-08-03 15:00\t\t\t-40\t368\t\t\t\t100\n%R\t10034\tS34-060\tLower-in & Backfill KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-07-13 07:00\t2026-08-05 15:00\t\t\t-40\t144\t\t\t\t100\n%R\t10035\tS34-070\tReinstatement KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-08-19 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10036\tC-010\tWadi Hanifa HDD Crossing KP529+800\t5040\t1001\tTT_Task\tTK_Active\t2026-03-26 07:00\t2026-05-13 15:00\t2026-03-26 07:00\t\t24\t160\t45\t\t\t100\n%R\t10037\tC-020\tPump Station 2 Tie-in KP536+000\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-27 07:00\t2026-09-09 15:00\t\t\t40\t80\t\tCS_MEO\t2026-09-02 15:00\t100\n%R\t10038\tC-030\tCathodic Protection System — Section 2 Mainline\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-09-09 15:00\t\t\t120\t200\t\t\t\t100\n%R\t10039\tT-010\tHydrostatic Test — Section 2 Mainline\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-30 07:00\t2026-08-19 15:00\t\t\t-40\t120\t\t\t\t100\n%R\t10040\tT-020\tGolden Weld Tie-in KP518+400\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-08-27 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10041\tT-030\tPre-commissioning & Dewatering\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-09-07 15:00\t\t\t-40\t96\t\t\t\t100\n%R\t10042\tM-100\tSection 2 Mechanical Completion\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\tCS_MANDFIN\t2026-09-01 15:00\t100\n%R\t10043\tM-110\tHandover to Operations\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\t\t\t100\n%E\n";
 const BASELINE_XER = "ERMHDR\t19.12\t2025-08-15\tProject\tadmin\tPRISM demo export\tdbxDatabaseNoName\tProject Management\tSAR\n%T\tCALENDAR\n%F\tclndr_id\tclndr_name\tday_hr_cnt\tclndr_data\n%R\t100\tNAJD Site — Sun-Thu 8h (KSA)\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|07:00|f|15:00)())))(0||2()((0||0(s|07:00|f|15:00)())))(0||3()((0||0(s|07:00|f|15:00)())))(0||4()((0||0(s|07:00|f|15:00)())))(0||5()((0||0(s|07:00|f|15:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()((0||0(d|45923)())(0||1(d|46100)())(0||2(d|46103)())(0||3(d|46104)())(0||4(d|46099)((0||0(s|07:00|f|11:00)())))))))\n%R\t101\tNAJD Office — Sun-Thu 8h\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|08:00|f|16:00)())))(0||2()((0||0(s|08:00|f|16:00)())))(0||3()((0||0(s|08:00|f|16:00)())))(0||4()((0||0(s|08:00|f|16:00)())))(0||5()((0||0(s|08:00|f|16:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()())))\n%T\tPROJECT\n%F\tproj_id\tproj_short_name\tplan_start_date\tplan_end_date\tlast_recalc_date\tlast_schedule_date\tclndr_id\n%R\t1001\tNAJD-S2\t2025-09-07 07:00\t2026-08-05 15:00\t2025-08-15 08:00\t\t100\n%T\tPROJWBS\n%F\twbs_id\tparent_wbs_id\twbs_short_name\twbs_name\tproj_node_flag\n%R\t5000\t\tNAJD-S2\tNAJD Water Transmission — Section 2\tY\n%R\t5010\t5000\tGEN\tGeneral & Milestones\tN\n%R\t5020\t5000\tPROC\tProcurement\tN\n%R\t5030\t5000\tPIPE\tPipeline Works\tN\n%R\t5031\t5030\tSEG-A\tSegment A — KP512+000 to KP518+000\tN\n%R\t5032\t5030\tSEG-B\tSegment B — KP518+000 to KP524+000\tN\n%R\t5033\t5030\tSEG-C\tSegment C — KP524+000 to KP530+000\tN\n%R\t5034\t5030\tSEG-D\tSegment D — KP530+000 to KP536+000\tN\n%R\t5040\t5000\tSTX\tStations & Crossings\tN\n%R\t5050\t5000\tTC\tTesting & Commissioning\tN\n%T\tRSRC\n%F\trsrc_id\trsrc_short_name\trsrc_name\trsrc_type\n%R\t201\tEW-CREW\tEarthworks Crew\tRT_Labor\n%R\t202\tWELD-CREW\tWelding & NDT Crew\tRT_Labor\n%R\t203\tSIDEBOOM\tSideboom Spread\tRT_Equip\n%R\t204\tEXCAV\t30t Excavator Fleet\tRT_Equip\n%R\t205\tPIPE-48\tPipe 48in CS API 5L\tRT_Mat\n%R\t206\tHDD-RIG\tHDD Maxi Rig\tRT_Equip\n%R\t207\tQAQC\tQA/QC Engineers\tRT_Labor\n%T\tRSRCRATE\n%F\trsrc_rate_id\trsrc_id\tmax_qty_per_hr\n%R\t301\t201\t2\n%R\t302\t202\t2\n%R\t303\t203\t1\n%R\t304\t206\t1\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10001\tA-000\tNotice to Proceed\t5010\t1001\tTT_Mile\tTK_NotStart\t2025-09-07 07:00\t2025-09-07 07:00\t\t\t80\t0\t\t\t\t100\n%R\t10002\tA-010\tMobilization & Temporary Works\t5010\t1001\tTT_Task\tTK_NotStart\t2025-09-07 07:00\t2025-10-05 15:00\t\t\t80\t160\t\t\t\t100\n%R\t10003\tA-020\tSite Facilities & Access Roads\t5010\t1001\tTT_Task\tTK_NotStart\t2025-10-06 07:00\t2025-11-16 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10004\tP-010\tPipe Mill Order & Manufacture\t5020\t1001\tTT_Task\tTK_NotStart\t2025-09-07 07:00\t2026-02-08 15:00\t\t\t80\t880\t\t\t\t101\n%R\t10005\tP-020\tPipe Delivery Lot 1 — Segments A and B\t5020\t1001\tTT_Task\tTK_NotStart\t2026-01-12 07:00\t2026-02-01 15:00\t\t\t80\t120\t\t\t\t101\n%R\t10006\tP-030\tPipe Delivery Lot 2 — Segments C and D\t5020\t1001\tTT_Task\tTK_NotStart\t2026-04-09 07:00\t2026-04-29 15:00\t\t\t80\t120\t\t\t\t101\n%R\t10007\tP-040\tValves & Fittings Procurement\t5020\t1001\tTT_Task\tTK_NotStart\t2026-05-21 07:00\t2026-06-17 15:00\t\t\t480\t160\t\t\t\t101\n%R\t10008\tS31-010\tSurvey & Set-out KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-06 07:00\t2025-10-12 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10009\tS31-020\tROW Clearing & Grading KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-13 07:00\t2025-10-28 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10010\tS31-030\tTrench Excavation KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-29 07:00\t2025-12-02 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10011\tS31-040\tPipe Stringing KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-11-05 07:00\t2025-11-18 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10012\tS31-050\tWelding & NDT KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-11-19 07:00\t2025-12-30 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10013\tS31-060\tLower-in & Backfill KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-12-31 07:00\t2026-01-25 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10014\tS31-070\tReinstatement KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2026-01-26 07:00\t2026-02-08 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10015\tS31-025\tDewatering Trial KP513+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-20 07:00\t2025-10-29 15:00\t\t\t80\t64\t\t\t\t100\n%R\t10016\tS32-010\tSurvey & Set-out KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-01 07:00\t2025-12-07 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10017\tS32-020\tROW Clearing & Grading KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-08 07:00\t2025-12-23 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10018\tS32-030\tTrench Excavation KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-24 07:00\t2026-01-27 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10019\tS32-040\tPipe Stringing KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-31 07:00\t2026-01-13 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10020\tS32-050\tWelding & NDT KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-01-14 07:00\t2026-02-24 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10021\tS32-060\tLower-in & Backfill KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-02-25 07:00\t2026-03-25 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10022\tS32-070\tReinstatement KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-03-26 07:00\t2026-04-08 15:00\t\t\t80\t80\t\t\t\t100\n%T\tTASKPRED\n%F\ttask_pred_id\ttask_id\tpred_task_id\tpred_type\tlag_hr_cnt\n%R\t20001\t10002\t10001\tPR_FS\t0\n%R\t20002\t10003\t10002\tPR_FS\t0\n%R\t20003\t10004\t10001\tPR_FS\t0\n%R\t20004\t10005\t10004\tPR_FF\t80\n%R\t20005\t10006\t10004\tPR_FS\t0\n%R\t20006\t10007\t10004\tPR_FS\t0\n%R\t20007\t10008\t10003\tPR_FS\t0\n%R\t20008\t10009\t10008\tPR_FS\t0\n%R\t20009\t10010\t10009\tPR_FS\t0\n%R\t20010\t10011\t10010\tPR_SS\t40\n%R\t20011\t10011\t10005\tPR_FS\t0\n%R\t20012\t10012\t10011\tPR_FS\t0\n%R\t20013\t10013\t10012\tPR_FS\t0\n%R\t20014\t10014\t10013\tPR_FS\t0\n%R\t20015\t10015\t10009\tPR_FS\t0\n%R\t20016\t10016\t10009\tPR_FS\t0\n%R\t20017\t10017\t10016\tPR_FS\t0\n%R\t20018\t10018\t10017\tPR_FS\t0\n%R\t20019\t10019\t10018\tPR_SS\t40\n%R\t20020\t10020\t10019\tPR_FS\t0\n%R\t20021\t10021\t10020\tPR_FS\t0\n%R\t20022\t10022\t10021\tPR_FS\t0\n%R\t20023\t10023\t10017\tPR_FS\t0\n%R\t20024\t10024\t10023\tPR_FS\t0\n%R\t20025\t10025\t10024\tPR_FS\t0\n%R\t20026\t10026\t10025\tPR_SS\t40\n%R\t20027\t10027\t10026\tPR_FS\t0\n%R\t20028\t10028\t10027\tPR_FS\t0\n%R\t20029\t10029\t10028\tPR_FS\t0\n%R\t20030\t10030\t10024\tPR_FS\t0\n%R\t20031\t10031\t10030\tPR_FS\t0\n%R\t20032\t10032\t10031\tPR_FS\t0\n%R\t20033\t10033\t10032\tPR_SS\t40\n%R\t20034\t10033\t10006\tPR_FS\t0\n%R\t20035\t10034\t10033\tPR_FS\t0\n%R\t20036\t10035\t10034\tPR_FS\t0\n%R\t20037\t10036\t10035\tPR_FS\t0\n%R\t20038\t10037\t10025\tPR_FS\t-40\n%R\t20039\t10038\t10036\tPR_FS\t0\n%R\t20040\t10039\t10035\tPR_FS\t0\n%R\t20041\t10039\t10029\tPR_FS\t0\n%R\t20042\t10039\t10014\tPR_FS\t0\n%R\t20043\t10039\t10022\tPR_FS\t0\n%R\t20044\t10039\t10037\tPR_FS\t0\n%R\t20045\t10039\t10007\tPR_FS\t0\n%R\t20046\t10040\t10027\tPR_FS\t0\n%R\t20047\t10041\t10039\tPR_FS\t0\n%R\t20048\t10041\t10040\tPR_FS\t0\n%R\t20049\t10042\t10041\tPR_FS\t0\n%R\t20050\t10043\t10042\tPR_FS\t80\n%T\tTASKRSRC\n%F\ttaskrsrc_id\ttask_id\trsrc_id\ttarget_cost\ttarget_qty\tact_reg_cost\tact_ot_cost\tact_reg_qty\tact_ot_qty\tremain_qty\n%R\t30001\t10002\t201\t1500000\t160\t\t\t\t\t160\n%R\t30002\t10003\t204\t1200000\t240\t\t\t\t\t240\n%R\t30003\t10004\t205\t2000000\t0\t\t\t\t\t0\n%R\t30004\t10005\t205\t800000\t0\t\t\t\t\t0\n%R\t30005\t10006\t205\t800000\t0\t\t\t\t\t0\n%R\t30006\t10007\t207\t600000\t0\t\t\t\t\t0\n%R\t30007\t10008\t207\t120000\t40\t\t\t\t\t40\n%R\t30008\t10009\t201\t300000\t96\t\t\t\t\t96\n%R\t30009\t10009\t204\t150000\t96\t\t\t\t\t96\n%R\t30010\t10010\t201\t800000\t200\t\t\t\t\t200\n%R\t30011\t10010\t204\t600000\t200\t\t\t\t\t200\n%R\t30012\t10011\t203\t600000\t80\t\t\t\t\t80\n%R\t30013\t10011\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30014\t10012\t202\t1800000\t240\t\t\t\t\t240\n%R\t30015\t10013\t203\t500000\t144\t\t\t\t\t144\n%R\t30016\t10013\t201\t400000\t144\t\t\t\t\t144\n%R\t30017\t10014\t201\t400000\t80\t\t\t\t\t80\n%R\t30018\t10015\t204\t250000\t64\t\t\t\t\t64\n%R\t30019\t10016\t207\t120000\t40\t\t\t\t\t40\n%R\t30020\t10017\t201\t300000\t96\t\t\t\t\t96\n%R\t30021\t10017\t204\t150000\t96\t\t\t\t\t96\n%R\t30022\t10018\t201\t800000\t200\t\t\t\t\t200\n%R\t30023\t10018\t204\t600000\t200\t\t\t\t\t200\n%R\t30024\t10019\t203\t600000\t80\t\t\t\t\t80\n%R\t30025\t10019\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30026\t10020\t202\t1800000\t240\t\t\t\t\t240\n%R\t30027\t10021\t203\t500000\t144\t\t\t\t\t144\n%R\t30028\t10021\t201\t400000\t144\t\t\t\t\t144\n%R\t30029\t10022\t201\t400000\t80\t\t\t\t\t80\n%R\t30030\t10023\t207\t120000\t40\t\t\t\t\t40\n%R\t30031\t10024\t201\t300000\t96\t\t\t\t\t96\n%R\t30032\t10024\t204\t150000\t96\t\t\t\t\t96\n%R\t30033\t10025\t201\t800000\t200\t\t\t\t\t200\n%R\t30034\t10025\t204\t600000\t200\t\t\t\t\t200\n%R\t30035\t10026\t203\t600000\t80\t\t\t\t\t80\n%R\t30036\t10026\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30037\t10027\t202\t1800000\t240\t\t\t\t\t240\n%R\t30038\t10028\t203\t500000\t144\t\t\t\t\t144\n%R\t30039\t10028\t201\t400000\t144\t\t\t\t\t144\n%R\t30040\t10029\t201\t400000\t80\t\t\t\t\t80\n%R\t30041\t10030\t207\t120000\t40\t\t\t\t\t40\n%R\t30042\t10031\t201\t300000\t96\t\t\t\t\t96\n%R\t30043\t10031\t204\t150000\t96\t\t\t\t\t96\n%R\t30044\t10032\t201\t800000\t200\t\t\t\t\t200\n%R\t30045\t10032\t204\t600000\t200\t\t\t\t\t200\n%R\t30046\t10033\t203\t600000\t80\t\t\t\t\t80\n%R\t30047\t10033\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30048\t10034\t202\t1800000\t240\t\t\t\t\t240\n%R\t30049\t10035\t203\t500000\t144\t\t\t\t\t144\n%R\t30050\t10035\t201\t400000\t144\t\t\t\t\t144\n%R\t30051\t10036\t201\t400000\t80\t\t\t\t\t80\n%R\t30052\t10037\t206\t2500000\t280\t\t\t\t\t280\n%R\t30053\t10038\t202\t700000\t80\t\t\t\t\t80\n%R\t30054\t10039\t207\t500000\t120\t\t\t\t\t120\n%R\t30055\t10040\t202\t300000\t40\t\t\t\t\t40\n%R\t30056\t10041\t207\t400000\t96\t\t\t\t\t96\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10023\tS33-010\tSurvey & Set-out KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-01-26 07:00\t2026-02-01 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10024\tS33-020\tROW Clearing & Grading KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-02 07:00\t2026-02-17 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10025\tS33-030\tTrench Excavation KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-18 07:00\t2026-03-29 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10026\tS33-040\tPipe Stringing KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-25 07:00\t2026-03-10 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10027\tS33-050\tWelding & NDT KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-03-11 07:00\t2026-04-26 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10028\tS33-060\tLower-in & Backfill KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-04-27 07:00\t2026-05-20 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10029\tS33-070\tReinstatement KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-05-21 07:00\t2026-06-03 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10030\tS34-010\tSurvey & Set-out KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-03-26 07:00\t2026-04-01 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10031\tS34-020\tROW Clearing & Grading KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-02 07:00\t2026-04-19 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10032\tS34-030\tTrench Excavation KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-20 07:00\t2026-05-24 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10033\tS34-040\tPipe Stringing KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-27 07:00\t2026-05-10 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10034\tS34-050\tWelding & NDT KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-21 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10035\tS34-060\tLower-in & Backfill KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-06-22 07:00\t2026-07-15 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10036\tS34-070\tReinstatement KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-07-16 07:00\t2026-07-29 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10037\tC-010\tWadi Hanifa HDD Crossing KP529+800\t5040\t1001\tTT_Task\tTK_NotStart\t2026-03-09 07:00\t2026-04-29 15:00\t\t\t80\t280\t\t\t\t100\n%R\t10038\tC-020\tPump Station 2 Tie-in KP536+000\t5040\t1001\tTT_Task\tTK_NotStart\t2026-07-23 07:00\t2026-08-05 15:00\t\t\t40\t80\t\tCS_MEO\t2026-07-29 15:00\t100\n%R\t10039\tT-010\tHydrostatic Test — Section 2 Mainline\t5050\t1001\tTT_Task\tTK_NotStart\t2026-06-25 07:00\t2026-07-15 15:00\t\t\t0\t120\t\t\t\t100\n%R\t10040\tT-020\tGolden Weld Tie-in KP518+400\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-19 07:00\t2026-07-23 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10041\tT-030\tPre-commissioning & Dewatering\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-19 07:00\t2026-08-03 15:00\t\t\t0\t96\t\t\t\t100\n%R\t10042\tM-100\tSection 2 Mechanical Completion\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-08-04 07:00\t2026-08-04 07:00\t\t\t0\t0\t\tCS_MANDFIN\t2026-09-01 15:00\t100\n%R\t10043\tM-110\tHandover to Operations\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-08-04 07:00\t2026-08-04 07:00\t\t\t0\t0\t\t\t\t100\n%E\n";
 
 
@@ -1712,6 +1932,78 @@ function ringSVG(pct, color, size = 52) {
     <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="5"
       stroke-linecap="round" stroke-dasharray="${(filled * c).toFixed(1)} ${c.toFixed(1)}"/>
   </svg>`;
+}
+
+// ---------- reporting window ----------
+
+function isoDate(ms) {
+  if (ms === undefined || ms === null) return '';
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+function parseISO(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : undefined;
+}
+
+const WIN_PRESETS = [
+  ['back1w', 'Last week'], ['back2w', 'Last 2 wk'], ['back4w', 'Last 4 wk'],
+  ['month', 'This month'], ['next2w', 'Next 2 wk'], ['next4w', 'Next 4 wk'],
+  ['next6w', 'Next 6 wk'], ['full', 'Full plan'],
+];
+
+// One shared control: presets are data-date-relative, plus custom from/to and
+// ◀ ▶ stepping by the window's own length.
+function windowBarHTML(store) {
+  const w = store.win;
+  return `<div class="winbar">
+    <div class="winpresets">
+      ${WIN_PRESETS.map(([id, label]) => `<button class="winpreset ${w.preset === id ? 'active' : ''}" data-preset="${id}">${label}</button>`).join('')}
+    </div>
+    <div class="winrange">
+      <button class="btn small" data-step="-1" title="Shift window back">◀</button>
+      <input type="date" data-win-from value="${isoDate(w.from)}" aria-label="Window from">
+      <span style="color:var(--dim-2)">→</span>
+      <input type="date" data-win-to value="${isoDate(w.to)}" aria-label="Window to">
+      <button class="btn small" data-step="1" title="Shift window forward">▶</button>
+    </div>
+  </div>`;
+}
+
+function wireWindowBar(el, store) {
+  el.querySelectorAll('[data-preset]').forEach((b) =>
+    b.addEventListener('click', () => store.setWindowPreset(b.dataset.preset)));
+  el.querySelectorAll('[data-step]').forEach((b) =>
+    b.addEventListener('click', () => store.stepWindow(+b.dataset.step)));
+  const from = el.querySelector('[data-win-from]');
+  const to = el.querySelector('[data-win-to]');
+  const custom = () => {
+    const f = parseISO(from.value), t = parseISO(to.value);
+    if (f !== undefined && t !== undefined && t >= f) store.setWindow(f, t, 'custom');
+  };
+  from.addEventListener('change', custom);
+  to.addEventListener('change', custom);
+}
+
+// ---------- CSV export (planners live in Excel) ----------
+
+function downloadCSV(filename, headers, rows) {
+  const cell = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const text = [headers, ...rows].map((r) => r.map(cell).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function csvButton(label = 'Export CSV') {
+  return `<button class="btn small" data-csv>${label}</button>`;
 }
 
 function offenderListHTML(offenders, model, cap = 24) {
@@ -2231,6 +2523,33 @@ const ViewHealth = {
             </tr>`).join('')}
           </tbody>
         </table></div>
+      </div>
+
+      <div class="section">
+        <h2>Update integrity</h2>
+        <p class="sub">Is the latest status update trustworthy? These are recording-quality checks on actual dates and status codes — fix these before believing any metric above.</p>
+        <div class="tablewrap"><table class="ledger">
+          <thead><tr><th>Check</th><th class="num">Findings</th><th>Status</th></tr></thead>
+          <tbody>
+            ${store.d.integrity.map((f, i) => `<tr class="rowlink" data-integ="${i}" tabindex="0">
+              <td>${esc(f.name)}<div style="color:var(--dim-2);font-size:11.5px;max-width:64ch">${esc(f.why)}</div></td>
+              <td class="num">${f.tasks.length}</td>
+              <td>${statusPill(f.tasks.length ? 'fail' : 'pass')}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>
+      </div>
+
+      <div class="section">
+        <h2>Float bands</h2>
+        <p class="sub">The near-critical radar across incomplete work${store.d.bands.unmeasured ? ` (${store.d.bands.unmeasured} with no float in file — not binned, not assumed)` : ''}.</p>
+        <div class="tablewrap"><table class="ledger"><tbody>
+          ${store.d.bands.bands.map((b, i) => `<tr class="rowlink" data-band="${i}" tabindex="0">
+            <td style="width:190px">${esc(b.label)}</td>
+            <td class="num" style="width:56px">${b.tasks.length}</td>
+            <td><span class="bar" style="display:block;max-width:420px"><i style="width:${store.d.bands.bands.some((x) => x.tasks.length) ? (b.tasks.length / Math.max(...store.d.bands.bands.map((x) => x.tasks.length)) * 100).toFixed(0) : 0}%;background:${b.id === 'neg' || b.id === 'crit' ? 'var(--bad)' : b.id === 'near' ? 'var(--warn)' : 'var(--chart-line)'}"></i></span></td>
+          </tr>`).join('')}
+        </tbody></table></div>
       </div>`;
 
     el.querySelectorAll('[data-check]').forEach((tr) => {
@@ -2247,6 +2566,535 @@ const ViewHealth = {
       };
       tr.addEventListener('click', open);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+
+    el.querySelectorAll('[data-integ]').forEach((tr) => {
+      const open = () => {
+        const f = store.d.integrity[+tr.dataset.integ];
+        openModal(f.name, `${f.tasks.length} finding${f.tasks.length === 1 ? '' : 's'}`, `
+          <p>${esc(f.why)}</p>
+          ${f.tasks.length ? offenderListHTML(f.tasks.map((t) => t.id), store.model, 40) : '<p class="sub">Clean.</p>'}`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+
+    el.querySelectorAll('[data-band]').forEach((tr) => {
+      const open = () => {
+        const b = store.d.bands.bands[+tr.dataset.band];
+        openModal(b.label, `${b.tasks.length} incomplete activities`, b.tasks.length
+          ? `<ul class="offender-list">${b.tasks.map((t) => `<li>${esc(t.code)} · ${t.floatDays.toFixed(1)} wd</li>`).join('')}</ul>`
+          : '<p class="sub">None in this band.</p>');
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+  },
+};
+
+
+// ---- src/views/timeline.js ----
+// Timeline — the planner's controllable window over the whole schedule.
+// Pick a reporting window (presets, custom dates, ◀ ▶ stepping); the lane
+// chart zooms to it and paints, per activity: the planned bar, the actual
+// bar (real act_start/act_end history), late edges, and the data-date rule.
+// Filters: text, status, critical-only, late-only. Every bar is clickable.
+
+
+
+function tlCss(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function tlIsLate(t, dd) {
+  if (dd === undefined || t.status === 'TK_Complete') return false;
+  return (t.targetEnd !== undefined && dayFloor(t.targetEnd) < dayFloor(dd))
+    || (t.status === 'TK_NotStart' && t.targetStart !== undefined && dayFloor(t.targetStart) < dayFloor(dd));
+}
+
+function tlRows(store) {
+  const m = store.model;
+  const f = store.tlFilter;
+  const { from, to } = store.win;
+  const q = (f.q || '').toLowerCase();
+  const rows = [];
+  const walk = (node, depth) => {
+    const kept = node.tasks.filter((t) => {
+      if (t.targetStart === undefined || t.targetEnd === undefined) return false;
+      const s = Math.min(t.targetStart, t.actStart ?? Infinity);
+      // an in-progress activity is present through the data date, even when
+      // its planned window is already behind us
+      const e = Math.max(t.targetEnd, t.actEnd ?? 0,
+        t.status === 'TK_Active' ? (m.dataDate ?? 0) : 0);
+      if (dayFloor(e) < dayFloor(from) || dayFloor(s) > dayFloor(to)) return false;
+      if (f.status !== 'all' && t.status !== f.status) return false;
+      if (f.critical && !(t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete')) return false;
+      if (f.late && !tlIsLate(t, m.dataDate)) return false;
+      if (q && !(t.code.toLowerCase().includes(q) || t.name.toLowerCase().includes(q))) return false;
+      return true;
+    }).sort((a, b) => a.targetStart - b.targetStart);
+    if (kept.length) {
+      rows.push({ header: node.name });
+      for (const t of kept) rows.push({ t });
+    }
+    for (const c of node.children) walk(c, depth + 1);
+  };
+  walk(m.wbsRoot, 0);
+  return rows;
+}
+
+function tlDraw(ctx, w, h, rows, store, hits) {
+  hits.length = 0;
+  const m = store.model;
+  const { from, to } = store.win;
+  const labelW = 132;
+  const rowH = 20;
+  const top = 22;
+  const X = (ms) => labelW + ((ms - from) / Math.max(to - from, DAY_MS)) * (w - labelW - 10);
+  const clampX = (x) => Math.min(Math.max(x, labelW), w - 10);
+
+  // time grid: weekly if window <= ~10 weeks, else monthly
+  ctx.font = '9px ' + tlCss('--mono');
+  const weekly = (to - from) <= 76 * DAY_MS;
+  let g = dayFloor(from);
+  if (weekly) { while (new Date(g).getUTCDay() !== 0) g += DAY_MS; } // snap to Sunday
+  else { const d = new Date(dayFloor(from)); g = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1); }
+  while (g <= to) {
+    const x = Math.round(X(g)) + 0.5;
+    ctx.strokeStyle = 'rgba(34,48,73,.4)';
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, h - 4); ctx.stroke();
+    const gd = new Date(g);
+    ctx.fillStyle = tlCss('--dim-2');
+    ctx.fillText(weekly
+      ? `${String(gd.getUTCDate()).padStart(2, '0')}/${String(gd.getUTCMonth() + 1).padStart(2, '0')}`
+      : `${String(gd.getUTCMonth() + 1).padStart(2, '0')}/${String(gd.getUTCFullYear()).slice(2)}`, x + 2, 12);
+    if (weekly) g += 7 * DAY_MS;
+    else { const d = new Date(g); g = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1); }
+  }
+
+  rows.forEach((row, i) => {
+    const y = top + i * rowH;
+    if (row.header) {
+      ctx.fillStyle = tlCss('--dim-2');
+      ctx.font = '600 9px ' + tlCss('--mono');
+      ctx.fillText(('// ' + row.header).toUpperCase().slice(0, 60), 4, y + 13);
+      ctx.strokeStyle = 'rgba(34,48,73,.5)';
+      ctx.beginPath(); ctx.moveTo(0, y + rowH - 2.5); ctx.lineTo(w, y + rowH - 2.5); ctx.stroke();
+      return;
+    }
+    const t = row.t;
+    const late = tlIsLate(t, m.dataDate);
+    const crit = t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 && t.status !== 'TK_Complete';
+    ctx.font = '10px ' + tlCss('--mono');
+    ctx.fillStyle = late ? tlCss('--bad') : crit ? tlCss('--warn') : tlCss('--dim');
+    ctx.fillText(t.code.slice(0, 14), 4, y + 13);
+
+    const by = y + 5, bh = 9;
+    // planned bar: outline
+    const px0 = clampX(X(t.targetStart)), px1 = clampX(X(t.targetEnd + DAY_MS));
+    if (t.milestone) {
+      const cx = px0, cy = by + bh / 2;
+      ctx.fillStyle = crit || late ? tlCss('--bad') : tlCss('--text');
+      ctx.beginPath(); ctx.moveTo(cx, cy - 5); ctx.lineTo(cx + 5, cy); ctx.lineTo(cx, cy + 5); ctx.lineTo(cx - 5, cy); ctx.closePath(); ctx.fill();
+    } else if (px1 > px0) {
+      ctx.strokeStyle = crit ? tlCss('--bad') : 'rgba(139,151,173,.55)';
+      ctx.setLineDash(crit ? [3, 2] : []);
+      ctx.strokeRect(px0 + 0.5, by + 0.5, px1 - px0 - 1, bh - 1);
+      ctx.setLineDash([]);
+    }
+    // actual bar: solid history from real actual dates
+    if (t.actStart !== undefined) {
+      const aEnd = t.actEnd !== undefined ? t.actEnd : (m.dataDate ?? t.actStart);
+      const ax0 = clampX(X(t.actStart)), ax1 = clampX(X(aEnd + DAY_MS));
+      if (ax1 > ax0) {
+        ctx.fillStyle = t.status === 'TK_Complete' ? 'rgba(38,165,161,.9)' : tlCss('--accent');
+        ctx.fillRect(ax0, by + 2, ax1 - ax0, bh - 4);
+      }
+    }
+    // late edge marker at the planned finish
+    if (late && !t.milestone && px1 > labelW) {
+      ctx.fillStyle = tlCss('--bad');
+      ctx.fillRect(px1 - 1.5, by - 1, 3, bh + 2);
+    }
+    hits.push({ t, x0: labelW, x1: w, y0: y, y1: y + rowH, bx0: Math.min(px0, X(t.actStart ?? Infinity)), bx1: Math.max(px1, 0) });
+  });
+
+  // data date
+  if (m.dataDate !== undefined && m.dataDate >= from && m.dataDate <= to) {
+    const x = Math.round(X(m.dataDate)) + 0.5;
+    ctx.strokeStyle = tlCss('--accent'); ctx.setLineDash([2, 4]);
+    ctx.beginPath(); ctx.moveTo(x, top - 8); ctx.lineTo(x, h - 4); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = tlCss('--accent');
+    ctx.fillText('DD', x + 3, top + 2);
+  }
+}
+
+const ViewTimeline = {
+  id: 'timeline', title: 'Timeline', group: 'Reporting',
+  chip(store) {
+    return `<span class="num">${isoDate(store.win.from)} → ${isoDate(store.win.to)}</span>`;
+  },
+  render(el, store) {
+    const m = store.model;
+    if (!store.tlFilter) store.tlFilter = { q: '', status: 'all', critical: false, late: false };
+    const f = store.tlFilter;
+    const rows = tlRows(store);
+    const tasks = rows.filter((r) => r.t).map((r) => r.t);
+    const lateCount = tasks.filter((t) => tlIsLate(t, m.dataDate)).length;
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Timeline</h2>
+        <p class="sub">Control the reporting window; the lanes zoom to it. Hollow bars are the plan, solid fills are recorded actuals, the red edge marks work past its planned date. Click any bar.</p>
+        ${windowBarHTML(store)}
+        <div class="filterrow">
+          <input type="search" data-f-q placeholder="filter code / name…" value="${esc(f.q)}" aria-label="Filter activities">
+          <select data-f-status aria-label="Status filter">
+            <option value="all" ${f.status === 'all' ? 'selected' : ''}>All statuses</option>
+            <option value="TK_Complete" ${f.status === 'TK_Complete' ? 'selected' : ''}>Complete</option>
+            <option value="TK_Active" ${f.status === 'TK_Active' ? 'selected' : ''}>In progress</option>
+            <option value="TK_NotStart" ${f.status === 'TK_NotStart' ? 'selected' : ''}>Not started</option>
+          </select>
+          <button class="winpreset ${f.critical ? 'active' : ''}" data-f-crit>Critical only</button>
+          <button class="winpreset ${f.late ? 'active' : ''}" data-f-late>Late only</button>
+          <span class="spacer"></span>
+          <span class="chip"><span class="num">${tasks.length}</span> shown · <span class="num" style="color:${lateCount ? 'var(--bad)' : 'var(--good)'}">${lateCount}</span> late</span>
+          <button class="btn small" data-csv>Export CSV</button>
+        </div>
+        <div class="chartbox"><canvas></canvas></div>
+        <div class="legend">
+          <span><i style="background:none;border:1px solid rgba(139,151,173,.55);height:8px"></i>planned</span>
+          <span><i style="background:var(--accent);height:8px"></i>actual (in progress)</span>
+          <span><i style="background:rgba(38,165,161,.9);height:8px"></i>actual (complete)</span>
+          <span><i style="background:var(--bad);width:3px;height:10px"></i>late edge</span>
+          <span><i style="background:none;border:1.5px dashed var(--bad);height:8px"></i>critical</span>
+        </div>
+        ${a11yTable('Timeline activities in window',
+          ['Code', 'Activity', 'Planned start', 'Planned finish', 'Actual start', 'Actual finish', 'Status', 'Late'],
+          tasks.map((t) => [t.code, t.name, fmtDate(t.targetStart), fmtDate(t.targetEnd),
+            t.actStart !== undefined ? fmtDate(t.actStart) : 'n/a', t.actEnd !== undefined ? fmtDate(t.actEnd) : 'n/a',
+            t.status, tlIsLate(t, m.dataDate) ? 'yes' : 'no']))}
+      </div>`;
+
+    wireWindowBar(el, store);
+    const rerender = () => ViewTimeline.render(el, store);
+    el.querySelector('[data-f-q]').addEventListener('input', (e) => { f.q = e.target.value; rerender(); });
+    el.querySelector('[data-f-status]').addEventListener('change', (e) => { f.status = e.target.value; rerender(); });
+    el.querySelector('[data-f-crit]').addEventListener('click', () => { f.critical = !f.critical; rerender(); });
+    el.querySelector('[data-f-late]').addEventListener('click', () => { f.late = !f.late; rerender(); });
+    el.querySelector('[data-csv]').addEventListener('click', () => downloadCSV(
+      `timeline_${isoDate(store.win.from)}_${isoDate(store.win.to)}.csv`,
+      ['code', 'name', 'wbs', 'planned_start', 'planned_finish', 'actual_start', 'actual_finish', 'status', 'float_wd', 'late'],
+      tasks.map((t) => [t.code, t.name, m.wbsById.get(t.wbsId)?.name || '', isoDate(t.targetStart), isoDate(t.targetEnd),
+        isoDate(t.actStart), isoDate(t.actEnd), t.status,
+        t.floatDays !== undefined ? t.floatDays.toFixed(1) : '', tlIsLate(t, m.dataDate) ? 'yes' : 'no'])));
+
+    const canvas = el.querySelector('canvas');
+    const hits = [];
+    const height = Math.min(Math.max(rows.length * 20 + 30, 120), 640);
+    mountCanvas(canvas, height, (ctx, w, h) => tlDraw(ctx, w, h, rows, store, hits));
+    const tip = chartTip(canvas.parentElement);
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const my = e.clientY - rect.top, mx = e.clientX - rect.left;
+      const hit = hits.find((hh) => my >= hh.y0 && my < hh.y1 && mx >= hh.x0);
+      canvas.style.cursor = hit ? 'pointer' : 'default';
+      if (!hit) { tip.hide(); return; }
+      const t = hit.t;
+      tip.show(`<span class="num">${esc(t.code)}</span> ${esc(t.name.slice(0, 40))}<br>` +
+        `plan <b>${fmtDate(t.targetStart)} → ${fmtDate(t.targetEnd)}</b>` +
+        (t.actStart !== undefined ? `<br>actual <b>${fmtDate(t.actStart)} → ${t.actEnd !== undefined ? fmtDate(t.actEnd) : '…'}</b>` : ''), mx, my);
+    });
+    canvas.addEventListener('mouseleave', () => tip.hide());
+    canvas.addEventListener('click', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const my = e.clientY - rect.top, mx = e.clientX - rect.left;
+      const hit = hits.find((hh) => my >= hh.y0 && my < hh.y1 && mx >= hh.x0);
+      if (hit) openModal(`${hit.t.code} — ${hit.t.name}`, 'timeline detail', taskModalBody(hit.t, m));
+    });
+  },
+};
+
+
+// ---- src/views/report.js ----
+// Period Report — the look-back: for the chosen window, what was done, what
+// started, what was planned and missed, milestones hit and missed, and the
+// value of work completed (real actual dates) against planned value. With a
+// copy-ready plain-text report for the weekly email and CSV export.
+
+
+
+function repTable(el, store, items, cols, mapRow, emptyText) {
+  if (!items.length) return `<p class="sub" style="margin:4px 0 0">${esc(emptyText)}</p>`;
+  return `<div class="tablewrap"><table class="ledger">
+    <thead><tr>${cols.map((c) => `<th class="${c.num ? 'num' : ''}">${esc(c.h)}</th>`).join('')}</tr></thead>
+    <tbody>${items.map((it, i) => `<tr class="rowlink" data-rep="${el}:${i}" tabindex="0">${mapRow(it)}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function slipCell(slipWd) {
+  if (slipWd === undefined) return `<td class="num">${naTag('no data date')}</td>`;
+  return `<td class="num" style="color:var(--bad)">+${slipWd} wd</td>`;
+}
+
+function buildReportText(store, rep) {
+  const m = store.model;
+  const L = [];
+  const line = (s = '') => L.push(s);
+  line(`PROGRESS REPORT — ${store.modelName}`);
+  line(`Window: ${fmtDate(rep.from)} to ${fmtDate(rep.to)} · Data date: ${fmtDate(m.dataDate)}`);
+  line('='.repeat(64));
+  line();
+  line(`COMPLETED IN WINDOW (${rep.completed.length}) — value ${fmtMoney(rep.valueDone)}`);
+  for (const t of rep.completed) line(`  ${t.code.padEnd(10)} ${t.name}  [${fmtDate(t.actEnd)}]`);
+  line();
+  line(`STARTED IN WINDOW (${rep.started.length})`);
+  for (const t of rep.started) line(`  ${t.code.padEnd(10)} ${t.name}  [${fmtDate(t.actStart)}]`);
+  line();
+  line(`MISSED FINISHES (${rep.missedFinish.length}) — planned to finish, not complete`);
+  for (const { t, slipWd } of rep.missedFinish) line(`  ${t.code.padEnd(10)} ${t.name}  planned ${fmtDate(t.targetEnd)}${slipWd !== undefined ? ` · ${slipWd} wd behind` : ''}`);
+  line();
+  line(`MISSED STARTS (${rep.missedStart.length}) — planned to start, not started`);
+  for (const { t, slipWd } of rep.missedStart) line(`  ${t.code.padEnd(10)} ${t.name}  planned ${fmtDate(t.targetStart)}${slipWd !== undefined ? ` · ${slipWd} wd behind` : ''}`);
+  line();
+  line(`MILESTONES — hit ${rep.milestonesHit.length}, missed ${rep.milestonesMissed.length}`);
+  for (const t of rep.milestonesHit) line(`  ✓ ${t.code.padEnd(10)} ${t.name}  [${fmtDate(t.actEnd ?? t.actStart)}]`);
+  for (const t of rep.milestonesMissed) line(`  ✗ ${t.code.padEnd(10)} ${t.name}  planned ${fmtDate(t.targetEnd)}`);
+  line();
+  line(`Planned value in window: ${fmtMoney(rep.valuePlanned)} · Completed value: ${fmtMoney(rep.valueDone)}`);
+  line(`Generated by PRISM Deep Field — values derived only from the XER's own fields.`);
+  return L.join('\n');
+}
+
+const ViewReport = {
+  id: 'report', title: 'Period Report', group: 'Reporting',
+  chip(store) {
+    return `<span class="num">${isoDate(store.win.from)} → ${isoDate(store.win.to)}</span>`;
+  },
+  render(el, store) {
+    const m = store.model;
+    const rep = store.d.report;
+    const doneTone = rep.completed.length >= rep.missedFinish.length ? 'good' : 'warn';
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Period report</h2>
+        <p class="sub">The look-back for the chosen window: completions and starts come from recorded actual dates; "missed" means planned inside the window's elapsed portion and still not done — future work is never called late.</p>
+        ${windowBarHTML(store)}
+        <div class="statrow" style="margin-top:14px">
+          ${statTile({ id: 'done', label: 'Completed', value: `<span class="num">${rep.completed.length}</span>`, tone: doneTone, note: fmtMoney(rep.valueDone) + ' value' })}
+          ${statTile({ id: 'started', label: 'Started', value: `<span class="num">${rep.started.length}</span>`, note: 'actual starts in window' })}
+          ${statTile({ id: 'missf', label: 'Missed finishes', value: `<span class="num">${rep.missedFinish.length}</span>`, tone: rep.missedFinish.length ? 'bad' : 'good', note: 'planned, not complete' })}
+          ${statTile({ id: 'misss', label: 'Missed starts', value: `<span class="num">${rep.missedStart.length}</span>`, tone: rep.missedStart.length ? 'warn' : 'good', note: 'planned, not started' })}
+          ${statTile({ id: 'pv', label: 'Planned value', value: `<span class="num" style="font-size:19px">${esc(fmtMoney(rep.valuePlanned))}</span>`, note: 'calendar-spread in window' })}
+        </div>
+        <div class="filterrow" style="margin-top:12px">
+          <span class="spacer"></span>
+          <button class="btn small" data-csv>Export CSV</button>
+          <button class="btn small primary" data-report-text>Copy report text</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Completed in window <span class="num" style="color:var(--good)">${rep.completed.length}</span></h2>
+        ${repTable('done', store, rep.completed,
+          [{ h: 'Code' }, { h: 'Activity' }, { h: 'Actual finish', num: true }, { h: 'Value', num: true }],
+          (t) => `<td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td><td class="num">${fmtDate(t.actEnd)}</td><td class="num">${esc(fmtMoney(t.targetCost))}</td>`,
+          'Nothing completed in this window.')}
+      </div>
+
+      <div class="section">
+        <h2>Missed finishes <span class="num" style="color:${rep.missedFinish.length ? 'var(--bad)' : 'var(--good)'}">${rep.missedFinish.length}</span></h2>
+        <p class="sub">Planned to finish in the window's elapsed portion, still not complete — ranked by working days behind.</p>
+        ${repTable('missf', store, rep.missedFinish,
+          [{ h: 'Code' }, { h: 'Activity' }, { h: 'Planned finish', num: true }, { h: 'Behind', num: true }, { h: 'Status' }],
+          ({ t, slipWd }) => `<td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td><td class="num">${fmtDate(t.targetEnd)}</td>${slipCell(slipWd)}<td>${t.status === 'TK_Active' ? 'in progress' : 'not started'}</td>`,
+          'No missed finishes in this window.')}
+      </div>
+
+      <div class="section">
+        <h2>Missed starts <span class="num" style="color:${rep.missedStart.length ? 'var(--warn)' : 'var(--good)'}">${rep.missedStart.length}</span></h2>
+        ${repTable('misss', store, rep.missedStart,
+          [{ h: 'Code' }, { h: 'Activity' }, { h: 'Planned start', num: true }, { h: 'Behind', num: true }],
+          ({ t, slipWd }) => `<td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td><td class="num">${fmtDate(t.targetStart)}</td>${slipCell(slipWd)}`,
+          'No missed starts in this window.')}
+      </div>
+
+      <div class="section">
+        <h2>Started in window <span class="num">${rep.started.length}</span></h2>
+        ${repTable('started', store, rep.started,
+          [{ h: 'Code' }, { h: 'Activity' }, { h: 'Actual start', num: true }, { h: 'Status' }],
+          (t) => `<td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td><td class="num">${fmtDate(t.actStart)}</td><td>${t.status === 'TK_Complete' ? 'complete' : 'in progress'}</td>`,
+          'Nothing started in this window.')}
+      </div>
+
+      <div class="section">
+        <h2>Milestones</h2>
+        ${rep.milestonesHit.length || rep.milestonesMissed.length ? `
+          <div class="tablewrap"><table class="ledger"><tbody>
+            ${rep.milestonesHit.map((t, i) => `<tr class="rowlink" data-rep="mh:${i}" tabindex="0"><td><span class="pill pass">hit</span></td><td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td><td class="num">${fmtDate(t.actEnd ?? t.actStart)}</td></tr>`).join('')}
+            ${rep.milestonesMissed.map((t, i) => `<tr class="rowlink" data-rep="mm:${i}" tabindex="0"><td><span class="pill fail">missed</span></td><td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td><td class="num">${fmtDate(t.targetEnd)}</td></tr>`).join('')}
+          </tbody></table></div>`
+        : '<p class="sub">No milestones fall in this window.</p>'}
+      </div>`;
+
+    wireWindowBar(el, store);
+
+    const lists = {
+      done: rep.completed, started: rep.started,
+      missf: rep.missedFinish.map((x) => x.t), misss: rep.missedStart.map((x) => x.t),
+      mh: rep.milestonesHit, mm: rep.milestonesMissed,
+    };
+    el.querySelectorAll('[data-rep]').forEach((tr) => {
+      const open = () => {
+        const [k, i] = tr.dataset.rep.split(':');
+        const t = lists[k][+i];
+        if (t) openModal(`${t.code} — ${t.name}`, 'period report detail', taskModalBody(t, m));
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+
+    el.querySelector('[data-csv]').addEventListener('click', () => {
+      const rows = [];
+      for (const t of rep.completed) rows.push(['completed', t.code, t.name, isoDate(t.actEnd), t.targetCost || '']);
+      for (const t of rep.started) rows.push(['started', t.code, t.name, isoDate(t.actStart), '']);
+      for (const { t, slipWd } of rep.missedFinish) rows.push(['missed_finish', t.code, t.name, isoDate(t.targetEnd), slipWd ?? '']);
+      for (const { t, slipWd } of rep.missedStart) rows.push(['missed_start', t.code, t.name, isoDate(t.targetStart), slipWd ?? '']);
+      for (const t of rep.milestonesHit) rows.push(['milestone_hit', t.code, t.name, isoDate(t.actEnd ?? t.actStart), '']);
+      for (const t of rep.milestonesMissed) rows.push(['milestone_missed', t.code, t.name, isoDate(t.targetEnd), '']);
+      downloadCSV(`period_report_${isoDate(rep.from)}_${isoDate(rep.to)}.csv`,
+        ['category', 'code', 'name', 'date', 'value_or_slip_wd'], rows);
+    });
+
+    el.querySelector('[data-report-text]').addEventListener('click', () => {
+      const text = buildReportText(store, rep);
+      const card = openModal('Report text', 'paste into the weekly email / client report', `
+        <textarea data-report-body spellcheck="false" style="width:100%;height:300px;background:rgba(5,6,11,.6);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px;font:12px/1.5 var(--mono);resize:vertical"></textarea>`,
+        `<button class="btn small primary" data-copy>Copy to clipboard</button>`);
+      card.querySelector('[data-report-body]').value = text;
+      card.querySelector('[data-copy]').addEventListener('click', async (e) => {
+        try { await navigator.clipboard.writeText(text); e.target.textContent = 'Copied ✓'; }
+        catch { card.querySelector('[data-report-body]').select(); document.execCommand('copy'); e.target.textContent = 'Copied ✓'; }
+      });
+    });
+  },
+};
+
+
+// ---- src/views/lookahead.js ----
+// Lookahead — the 2/4/6-week forward brief: what starts, what finishes,
+// which constraints fall due, and which planned starts are NOT actually
+// released because predecessors are incomplete (the readiness check that
+// separates a lookahead from a wish list).
+
+
+
+const LA_HORIZONS = [[14, '2 weeks'], [28, '4 weeks'], [42, '6 weeks']];
+
+const ViewLookahead = {
+  id: 'lookahead', title: 'Lookahead', group: 'Reporting',
+  horizon: 28,
+  chip(store) {
+    return `next <span class="num">${ViewLookahead.horizon / 7}</span> wk`;
+  },
+  render(el, store) {
+    const m = store.model;
+    if (m.dataDate === undefined) {
+      el.innerHTML = `<div class="empty"><h3>No data date</h3><p>${naTag('file has neither last_schedule_date nor last_recalc_date — a lookahead needs a "now"')}</p></div>`;
+      return;
+    }
+    const from = dayFloor(m.dataDate) + DAY_MS;
+    const to = dayFloor(m.dataDate) + ViewLookahead.horizon * DAY_MS;
+    const la = store.getLookahead(from, to);
+    const blockedIds = new Set(la.blockedStarts.map((b) => b.t.id));
+
+    const taskRows = (items, dateOf, extra) => items.map((t, i) => `
+      <tr class="rowlink" data-la="${extra}:${i}" tabindex="0">
+        <td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td>
+        <td class="num">${fmtDate(dateOf(t))}</td>
+        <td>${t.totalFloatHrs !== undefined && t.totalFloatHrs <= 0 ? '<span class="pill fail">critical</span>' : t.floatDays !== undefined && t.floatDays <= 5 ? '<span class="pill warn">near-crit</span>' : ''}
+        ${extra === 'start' && blockedIds.has(t.id) ? '<span class="pill warn">blocked</span>' : ''}</td>
+      </tr>`).join('');
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Lookahead</h2>
+        <p class="sub">The forward brief from the data date (${fmtDate(m.dataDate)}). "Blocked" starts have incomplete predecessors — scheduled is not the same as released.</p>
+        <div class="winbar"><div class="winpresets">
+          ${LA_HORIZONS.map(([d, label]) => `<button class="winpreset ${ViewLookahead.horizon === d ? 'active' : ''}" data-hz="${d}">${label}</button>`).join('')}
+        </div>
+        <div class="winrange"><span class="chip"><span class="num">${isoDate(from)} → ${isoDate(to)}</span></span>
+        <button class="btn small" data-csv>Export CSV</button></div></div>
+        <div class="statrow" style="margin-top:14px">
+          ${statTile({ id: 'st', label: 'Starting', value: `<span class="num">${la.starting.length}</span>`, note: 'planned starts in horizon' })}
+          ${statTile({ id: 'fi', label: 'Finishing', value: `<span class="num">${la.finishing.length}</span>`, note: 'planned finishes in horizon' })}
+          ${statTile({ id: 'bl', label: 'Blocked starts', value: `<span class="num">${la.blockedStarts.length}</span>`, tone: la.blockedStarts.length ? 'warn' : 'good', note: 'predecessors incomplete' })}
+          ${statTile({ id: 'cn', label: 'Constraints due', value: `<span class="num">${la.constraintsDue.length}</span>`, tone: la.constraintsDue.length ? 'warn' : 'good', note: 'cstr_date in horizon' })}
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Blocked starts <span class="num" style="color:${la.blockedStarts.length ? 'var(--warn)' : 'var(--good)'}">${la.blockedStarts.length}</span></h2>
+        <p class="sub">Planned to start in the horizon while a Finish-to-Start predecessor is unfinished (or a Start-to-Start predecessor unstarted). Chase these first.</p>
+        ${la.blockedStarts.length ? `<div class="tablewrap"><table class="ledger">
+          <thead><tr><th>Activity</th><th class="num">Planned start</th><th>Waiting on</th></tr></thead>
+          <tbody>${la.blockedStarts.map((b, i) => `<tr class="rowlink" data-la="blocked:${i}" tabindex="0">
+            <td><span class="num">${esc(b.t.code)}</span> ${esc(b.t.name)}</td>
+            <td class="num">${fmtDate(b.t.targetStart)}</td>
+            <td class="num">${b.blockers.map((x) => esc(x.pred.code) + (x.pred.status === 'TK_Active' ? ' (in progress)' : ' (not started)')).join(', ')}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : '<p class="sub">Every planned start in the horizon is logically released.</p>'}
+      </div>
+
+      <div class="section">
+        <h2>Starting <span class="num">${la.starting.length}</span></h2>
+        ${la.starting.length ? `<div class="tablewrap"><table class="ledger">
+          <thead><tr><th>Code</th><th>Activity</th><th class="num">Planned start</th><th>Flags</th></tr></thead>
+          <tbody>${taskRows(la.starting, (t) => t.targetStart, 'start')}</tbody></table></div>`
+        : '<p class="sub">No planned starts in this horizon.</p>'}
+      </div>
+
+      <div class="section">
+        <h2>Finishing <span class="num">${la.finishing.length}</span></h2>
+        ${la.finishing.length ? `<div class="tablewrap"><table class="ledger">
+          <thead><tr><th>Code</th><th>Activity</th><th class="num">Planned finish</th><th>Flags</th></tr></thead>
+          <tbody>${taskRows(la.finishing, (t) => t.targetEnd, 'finish')}</tbody></table></div>`
+        : '<p class="sub">No planned finishes in this horizon.</p>'}
+      </div>
+
+      <div class="section">
+        <h2>Constraints due <span class="num">${la.constraintsDue.length}</span></h2>
+        ${la.constraintsDue.length ? `<div class="tablewrap"><table class="ledger">
+          <thead><tr><th>Code</th><th>Activity</th><th class="num">Constraint</th><th class="num">Date</th></tr></thead>
+          <tbody>${la.constraintsDue.map((t, i) => `<tr class="rowlink" data-la="cstr:${i}" tabindex="0">
+            <td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td>
+            <td class="num">${esc(t.cstrType)}</td><td class="num">${fmtDate(t.cstrDate)}</td></tr>`).join('')}</tbody>
+        </table></div>` : '<p class="sub">No constraint dates fall in this horizon.</p>'}
+      </div>`;
+
+    el.querySelectorAll('[data-hz]').forEach((b) => b.addEventListener('click', () => {
+      ViewLookahead.horizon = +b.dataset.hz;
+      ViewLookahead.render(el, store);
+    }));
+
+    const lists = { start: la.starting, finish: la.finishing, cstr: la.constraintsDue, blocked: la.blockedStarts.map((b) => b.t) };
+    el.querySelectorAll('[data-la]').forEach((tr) => {
+      const open = () => {
+        const [k, i] = tr.dataset.la.split(':');
+        const t = lists[k][+i];
+        if (t) openModal(`${t.code} — ${t.name}`, 'lookahead detail', taskModalBody(t, m));
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+
+    el.querySelector('[data-csv]').addEventListener('click', () => {
+      const rows = [];
+      for (const t of la.starting) rows.push(['starting', t.code, t.name, isoDate(t.targetStart), blockedIds.has(t.id) ? 'blocked' : '']);
+      for (const t of la.finishing) rows.push(['finishing', t.code, t.name, isoDate(t.targetEnd), '']);
+      for (const t of la.constraintsDue) rows.push(['constraint_due', t.code, t.name, isoDate(t.cstrDate), t.cstrType]);
+      downloadCSV(`lookahead_${ViewLookahead.horizon}d_${isoDate(from)}.csv`,
+        ['category', 'code', 'name', 'date', 'flag'], rows);
     });
   },
 };
@@ -2908,11 +3756,20 @@ const ViewCompare = {
 
 
 
-const VIEWS = [ViewCommand, ViewWBS, ViewHealth, ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare];
+
+
+
+
+
+const VIEWS = [ViewCommand, ViewWBS, ViewHealth,
+  ViewTimeline, ViewReport, ViewLookahead,
+  ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare];
 
 const store = {
   model: null, modelName: '', baseline: null, baselineName: '',
   scope: null, view: 'command',
+  win: { from: 0, to: 0, preset: 'back4w' },
+  tlFilter: null,
   d: {},
   listeners: new Set(),
   on(fn) { this.listeners.add(fn); },
@@ -2929,13 +3786,67 @@ const store = {
       oos: findOutOfSequence(m),
       demand: resourceDemand(m, 'week'),
       cmp: this.baseline ? compareModels(m, this.baseline) : null,
+      report: windowReport(m, this.win.from, this.win.to),
+      integrity: updateIntegrity(m),
+      bands: floatBands(m),
     };
+  },
+
+  // ---- shared reporting window ----
+  planSpan() {
+    let t0 = Infinity, t1 = 0;
+    for (const t of this.model.tasks) {
+      if (t.targetStart !== undefined) t0 = Math.min(t0, t.targetStart);
+      if (t.targetEnd !== undefined) t1 = Math.max(t1, t.targetEnd);
+      if (t.actEnd !== undefined) t1 = Math.max(t1, t.actEnd);
+    }
+    return [dayFloor(t0), dayFloor(t1)];
+  },
+  setWindow(from, to, preset = 'custom') {
+    this.win = { from: dayFloor(from), to: dayFloor(to), preset };
+    if (this.model) this.d.report = windowReport(this.model, this.win.from, this.win.to);
+    this.emit();
+  },
+  setWindowPreset(preset) {
+    const m = this.model;
+    if (!m) return;
+    const dd = dayFloor(m.dataDate ?? Date.now());
+    const back = (days) => this.setWindow(dd - days * DAY_MS, dd, preset);
+    const fwd = (days) => this.setWindow(dd + DAY_MS, dd + days * DAY_MS, preset);
+    switch (preset) {
+      case 'back1w': return back(7);
+      case 'back2w': return back(14);
+      case 'back4w': return back(28);
+      case 'month': {
+        const d = new Date(dd);
+        return this.setWindow(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1),
+          Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0), preset);
+      }
+      case 'next2w': return fwd(14);
+      case 'next4w': return fwd(28);
+      case 'next6w': return fwd(42);
+      case 'full': {
+        const [a, b] = this.planSpan();
+        return this.setWindow(a, b, preset);
+      }
+    }
+  },
+  stepWindow(dir) {
+    const len = this.win.to - this.win.from + DAY_MS;
+    this.setWindow(this.win.from + dir * len, this.win.to + dir * len, 'custom');
+  },
+  getLookahead(from, to) {
+    return buildLookahead(this.model, from, to);
   },
 
   loadCurrent(text, name) {
     this.model = buildModel(parseXER(text));
     this.modelName = name;
     this.scope = null;
+    this.tlFilter = null;
+    const dd = this.model.dataDate;
+    if (dd !== undefined) this.win = { from: dayFloor(dd) - 28 * DAY_MS, to: dayFloor(dd), preset: 'back4w' };
+    else { const [a, b] = this.planSpan(); this.win = { from: a, to: b, preset: 'full' }; }
     this.recompute();
     this.emit();
   },

@@ -33,14 +33,39 @@ src/kernel/    pure functions — no DOM, no imports outside the kernel
   chainage     KP extraction + out-of-sequence repair queue
   resource     demand buckets; over-allocation only where a ceiling exists
   compare      baseline diff matched by task_code
-src/ui/        tokens.css (Field Ledger), modal (focus-trapped), components
-src/views/     command, wbs, health, gantt, chainage, scurve, resource, compare
+  period       reporting windows: look-back, look-ahead, update-integrity QA
+src/ui/        tokens.css (Deep Field), modal (focus-trapped), components
+src/views/     observatory, wbs, health, timeline, report, lookahead,
+               gantt, chainage, scurve, resource, compare
 tools/         make-fixture.js · build.js · smoke.js
 tests/         node --test unit suite, hand-derived expectations
 ```
 
 Views never call `parseXER`/`buildModel` — only the store does, and views
 subscribe to its change event.
+
+## The planner's reporting cycle
+
+One shared **reporting window** (presets relative to the data date, custom
+from/to, ◀ ▶ stepping) drives three views:
+
+- **Timeline** — the lanes zoom to the window; hollow bars are the plan,
+  solid fills are recorded actuals, red edges mark late work. Filters:
+  text, status, critical-only, late-only. CSV export.
+- **Period Report** — completed and started (from real actual dates, the
+  one history an XER genuinely carries), missed finishes/starts with
+  working-day slip, milestones hit/missed, value done vs planned value in
+  window, plus a copy-ready plain-text report for the weekly email.
+  Future work is never called late.
+- **Lookahead** — 2/4/6-week forward brief: starting, finishing,
+  constraints due, and **blocked starts** (planned to start while an FS
+  predecessor is unfinished — scheduled ≠ released).
+
+Schedule Health additionally runs **update-integrity QA** before you trust
+any metric: out-of-sequence progress (started before the FS predecessor
+actually finished, lag respected), future actual dates, complete-without-
+finish, progress-without-start, complete-with-remaining, un-statused work —
+plus a float-band radar (negative / critical / near-critical / watch / high).
 
 ## Documented conventions
 
