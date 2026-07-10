@@ -48,14 +48,16 @@ export const ViewCompare = {
           ${statTile({ id: 'slipped', label: 'Slipped', value: `<span class="num">${slipped.filter((x) => x.slipDays > 0).length}</span>`, tone: 'warn', note: 'later than baseline' })}
         </div>
         <div class="tablewrap"><table class="ledger">
-          <thead><tr><th>Activity</th><th class="num">Baseline finish</th><th class="num">Current finish</th><th class="num">Slip</th></tr></thead>
+          <thead><tr><th>Activity</th><th class="num">Baseline finish</th><th class="num">Current finish</th><th class="num">Slip</th><th class="num" title="Total float change vs baseline — negative is float consumed">Δ TF</th></tr></thead>
           <tbody>${cmp.matched.slice(0, 60).map((x) => `<tr class="rowlink" data-code="${esc(x.code)}" tabindex="0">
             <td><span class="num">${esc(x.code)}</span> ${esc(x.cur.name.slice(0, 44))}</td>
             <td class="num">${fmtDate(x.baseFinish)}</td>
             <td class="num">${fmtDate(x.curFinish)}</td>
             <td class="num">${cmpSlip(x.slipDays)}</td>
+            <td class="num">${x.floatDelta === undefined ? '—' : x.floatDelta < 0 ? `<span style="color:var(--bad)">${x.floatDelta} wd</span>` : `<span style="color:var(--dim)">${x.floatDelta > 0 ? '+' : ''}${x.floatDelta} wd</span>`}</td>
           </tr>`).join('')}</tbody>
-        </table></div>`;
+        </table></div>
+        <p class="sub" style="margin-top:10px">Δ TF is float erosion vs baseline — float being consumed is the earliest signal of schedule stress, often before any finish date moves.</p>`;
     } else if (tab === 'wbs') {
       body = `
         <div class="tablewrap"><table class="ledger">

@@ -82,10 +82,45 @@ export function computeEVM(model, gran = 'month') {
   const tcpi = bac - ac !== 0 ? (bac - ev) / (bac - ac) : undefined;
   const earnedPct = bac > 0 ? ev / bac : undefined;
 
+  const es = earnedSchedule(pv, ev, asOf, gran);
+
   return {
     gran, pv, pvAtDD,
     evPoint: asOf !== undefined ? { date: asOf, value: ev } : null,
     acPoint: asOf !== undefined ? { date: asOf, value: ac } : null,
-    bac, ev, ac, spi, cpi, eac, etc, vac, tcpi, earnedPct,
+    bac, ev, ac, spi, cpi, eac, etc, vac, tcpi, earnedPct, es,
+  };
+}
+
+// Earned Schedule per Lipke: ES = the point on the PLAN's own timeline at
+// which cumulative PV equals today's EV (whole periods + linear fraction);
+// AT = periods elapsed from plan start to the data date. SPI(t) = ES / AT,
+// SV(t) = ES − AT, in period units. Unlike cost-based SPI, SPI(t) does not
+// converge to 1.0 as the project limps to completion.
+export function earnedSchedule(pv, ev, asOf, gran = 'month') {
+  if (!pv.length) return { value: null, reason: 'No time-phased plan (no costed activities).' };
+  if (asOf === undefined) return { value: null, reason: 'No data date in file.' };
+  const unit = gran === 'week' ? 'weeks' : 'months';
+  // AT: periods from plan start to the data date (fractional)
+  const first = pv[0].start;
+  const last = pv[pv.length - 1].start;
+  const periodMs = pv.length > 1 ? (last - first) / (pv.length - 1) : DAY_MS * 30;
+  const at = (asOf - first) / periodMs;
+  if (at <= 0) return { value: null, reason: 'Data date precedes the plan start — AT is 0.' };
+  // ES: whole periods where cum PV <= EV, plus interpolated fraction
+  let es;
+  if (ev <= 0) es = 0;
+  else if (ev >= pv[pv.length - 1].cum) es = pv.length;
+  else {
+    let n = 0;
+    while (n < pv.length && pv[n].cum <= ev) n++;
+    const prevCum = n === 0 ? 0 : pv[n - 1].cum;
+    const stepCum = pv[n].cum - prevCum;
+    es = n + (stepCum > 0 ? (ev - prevCum) / stepCum : 0);
+  }
+  return {
+    value: es / at,     // SPI(t)
+    es, at, unit,
+    svt: es - at,       // SV(t): negative = periods behind, in time units
   };
 }

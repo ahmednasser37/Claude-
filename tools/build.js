@@ -31,6 +31,7 @@ const ORDER = [
   'src/views/timeline.js',
   'src/views/report.js',
   'src/views/lookahead.js',
+  'src/views/register.js',
   'src/views/gantt.js',
   'src/views/chainage.js',
   'src/views/scurve.js',

@@ -105,7 +105,7 @@ export function buildModel(parsed) {
       cal,
       raw: row,
       // filled below
-      chainage: null, targetCost: 0, actualCost: 0, assignments: [],
+      chainage: null, targetCost: 0, actualCost: 0, assignments: [], codes: [],
       milestone: false, origDays: undefined, floatDays: undefined,
     };
     task.milestone = task.taskType === 'TT_Mile' || task.taskType === 'TT_FinMile'
@@ -122,6 +122,37 @@ export function buildModel(parsed) {
     tasks.push(task);
     taskById.set(task.id, task);
     taskByCode.set(task.code, task);
+  }
+
+  // --- activity codes (ACTVTYPE / ACTVCODE / TASKACTV) ---
+  // The grouping axis planners actually report by (Area / Phase / Discipline),
+  // distinct from WBS.
+  const codeTypes = new Map(); // actv_code_type_id -> {id, name, scope, values: Map}
+  for (const row of t('ACTVTYPE')) {
+    codeTypes.set(row.actv_code_type_id, {
+      id: row.actv_code_type_id,
+      name: row.actv_code_type || `Code ${row.actv_code_type_id}`,
+      scope: row.actv_code_type_scope,
+      values: new Map(),
+    });
+  }
+  const codeValues = new Map(); // actv_code_id -> {id, typeId, shortName, name}
+  for (const row of t('ACTVCODE')) {
+    const v = {
+      id: row.actv_code_id,
+      typeId: row.actv_code_type_id,
+      shortName: row.short_name || '',
+      name: row.actv_code_name || row.short_name || row.actv_code_id,
+      parentId: row.parent_actv_code_id,
+    };
+    codeValues.set(v.id, v);
+    codeTypes.get(v.typeId)?.values.set(v.id, v);
+  }
+  for (const row of t('TASKACTV')) {
+    const task = taskById.get(row.task_id);
+    const value = codeValues.get(row.actv_code_id);
+    const type = codeTypes.get(row.actv_code_type_id);
+    if (task && value && type) task.codes.push({ type, value });
   }
 
   // --- relationships ---
@@ -171,6 +202,7 @@ export function buildModel(parsed) {
     project, dataDate, dataDateSource, projectCal,
     calendars, defaultCal: fallbackCal,
     wbsRoot, wbsById,
+    codeTypes, codeValues,
     tasks, taskById, taskByCode,
     preds, rsrcById, assignments,
     tablesSummary,

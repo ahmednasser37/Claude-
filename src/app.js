@@ -10,6 +10,7 @@ import { findOutOfSequence } from './kernel/chainage.js';
 import { resourceDemand } from './kernel/resource.js';
 import { compareModels } from './kernel/compare.js';
 import { windowReport, buildLookahead, updateIntegrity, floatBands } from './kernel/period.js';
+import { longestPath } from './kernel/cpm.js';
 import { dayFloor, DAY_MS } from './kernel/calendar.js';
 import { DEMO_XER, BASELINE_XER, DEMO_NAME, BASELINE_NAME } from './data/demo.js';
 import { closeModal } from './ui/modal.js';
@@ -20,6 +21,7 @@ import { ViewHealth } from './views/health.js';
 import { ViewTimeline } from './views/timeline.js';
 import { ViewReport } from './views/report.js';
 import { ViewLookahead } from './views/lookahead.js';
+import { ViewRegister } from './views/register.js';
 import { ViewGantt } from './views/gantt.js';
 import { ViewChainage } from './views/chainage.js';
 import { ViewSCurve } from './views/scurve.js';
@@ -27,7 +29,7 @@ import { ViewResource } from './views/resource.js';
 import { ViewCompare } from './views/compare.js';
 
 const VIEWS = [ViewCommand, ViewWBS, ViewHealth,
-  ViewTimeline, ViewReport, ViewLookahead,
+  ViewTimeline, ViewReport, ViewLookahead, ViewRegister,
   ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare];
 
 export const store = {
@@ -54,6 +56,7 @@ export const store = {
       report: windowReport(m, this.win.from, this.win.to),
       integrity: updateIntegrity(m),
       bands: floatBands(m),
+      lpath: longestPath(m),
     };
   },
 

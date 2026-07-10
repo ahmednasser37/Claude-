@@ -33,6 +33,7 @@ export const ViewSCurve = {
         <p class="sub">Monthly planned value with the cumulative plan line. EV and AC are single marks at the data date — the file carries one snapshot of actuals, not a history, so no actual curve is drawn.</p>
         <div class="ringrow">
           ${ring('SPI', evm.spi.value, (v) => v.toFixed(2), evm.spi.value >= 0.95 ? 'var(--good)' : evm.spi.value >= 0.85 ? 'var(--warn)' : 'var(--bad)', evm.spi.value === null ? esc(evm.spi.reason) : '')}
+          ${ring('SPI(t)', evm.es.value, (v) => v.toFixed(2), evm.es.value >= 0.95 ? 'var(--good)' : evm.es.value >= 0.85 ? 'var(--warn)' : 'var(--bad)', evm.es.value === null ? esc(evm.es.reason) : `${Math.abs(evm.es.svt).toFixed(1)} ${evm.es.unit} ${evm.es.svt < 0 ? 'behind' : 'ahead'}`)}
           ${ring('CPI', evm.cpi.value, (v) => v.toFixed(2), evm.cpi.value >= 0.95 ? 'var(--good)' : evm.cpi.value >= 0.85 ? 'var(--warn)' : 'var(--bad)', evm.cpi.value === null ? esc(evm.cpi.reason) : '')}
           ${ring('% earned', evm.earnedPct, (v) => fmtPct(v), 'var(--trace)')}
         </div>
@@ -139,6 +140,27 @@ export const ViewSCurve = {
         };
         pt(evm.ev, css('--good'), 'EV', 3);
         pt(evm.ac, css('--bad'), 'AC', evm.ac > evm.ev - maxCum * 0.05 && evm.ac < evm.ev + maxCum * 0.05 ? 14 : 3);
+
+        // Earned-schedule projection: trace today's EV horizontally back to
+        // the plan curve — where it lands is ES, "the date we were supposed
+        // to be here". The gap to the data date IS the slip, in time.
+        if (evm.es.value !== null && evm.ev > 0 && evm.ev < evm.bac) {
+          let n = 0;
+          while (n < pv.length && pv[n].cum <= evm.ev) n++;
+          if (n < pv.length) {
+            const prevCum = n === 0 ? 0 : pv[n - 1].cum;
+            const frac = (evm.ev - prevCum) / (pv[n].cum - prevCum || 1);
+            const x0 = n === 0 ? pad.l : X(n - 1);
+            const esX = x0 + frac * (X(n) - x0);
+            const yEv = Y(evm.ev);
+            ctx.strokeStyle = css('--good'); ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(ddX - 6, yEv); ctx.lineTo(esX, yEv); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(esX, yEv); ctx.lineTo(esX, h - pad.b); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = css('--good');
+            ctx.fillText('ES', esX - 6, h - pad.b - 5);
+          }
+        }
       }
       geom = { pad, w, h, X, count: pv.length };
     });

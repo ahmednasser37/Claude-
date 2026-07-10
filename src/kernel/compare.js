@@ -23,7 +23,13 @@ export function compareModels(current, baseline) {
       slipDays = workingDaysBetween(t.cal, Math.min(baseFinish, curFinish), Math.max(baseFinish, curFinish));
       if (dayFloor(curFinish) < dayFloor(baseFinish)) slipDays = -slipDays;
     }
-    matched.push({ code: t.code, cur: t, base: b, slipDays, curFinish, baseFinish });
+    // float erosion vs baseline: negative = float consumed (schedule stress
+    // even where the finish date hasn't moved yet)
+    let floatDelta;
+    if (t.floatDays !== undefined && b.floatDays !== undefined) {
+      floatDelta = +(t.floatDays - b.floatDays).toFixed(1);
+    }
+    matched.push({ code: t.code, cur: t, base: b, slipDays, curFinish, baseFinish, floatDelta });
   }
   for (const b of baseline.tasks) {
     if (!current.taskByCode.has(b.code)) removed.push(b);

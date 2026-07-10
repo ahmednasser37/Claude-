@@ -26,7 +26,7 @@ try {
   await page.waitForSelector('.statrow .stat');
 
   // Command view: demo model loaded, KPI row real
-  check(await page.locator('.navitem').count() === 11, 'sidebar lists 11 views');
+  check(await page.locator('.navitem').count() === 12, 'sidebar lists 12 views');
   await page.waitForFunction(() => document.querySelector('[data-count="acts"]')?.textContent === '43');
   check(true, 'Command KPIs count up to 43 activities');
 
@@ -48,7 +48,7 @@ try {
   // every view renders without page errors
   for (const [id, probe] of [
     ['wbs', '.wbsrow'], ['health', '[data-integ]'], ['timeline', '.winbar'],
-    ['report', '[data-report-text]'], ['lookahead', '[data-hz]'],
+    ['report', '[data-report-text]'], ['lookahead', '[data-hz]'], ['register', '[data-reg-group]'],
     ['gantt', '.taskcard'], ['chainage', '[data-oos]'], ['scurve', 'canvas'],
     ['resource', '[data-oa]'], ['compare', '[data-load-demo-baseline]'],
   ]) {
@@ -89,6 +89,16 @@ try {
   const reportText = await page.inputValue('[data-report-body]');
   check(reportText.includes('MISSED FINISHES') && reportText.includes('COMPLETED IN WINDOW'), 'copy-ready report text generated');
   await page.keyboard.press('Escape');
+
+  // register: group by activity code, sort by float
+  await page.click('[data-view="register"]');
+  await page.waitForSelector('[data-reg-group]');
+  await page.selectOption('[data-reg-group]', { label: 'Group: AREA' });
+  await page.waitForFunction(() => document.body.textContent.includes('North Spread'));
+  check(true, 'register groups by activity code (AREA)');
+  await page.click('[data-sort="tf"]');
+  await page.waitForFunction(() => document.querySelector('[data-sort="tf"]').textContent.includes('▲'));
+  check(true, 'register sorts by total float');
 
   // lookahead: blocked starts identified
   await page.click('[data-view="lookahead"]');

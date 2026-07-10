@@ -845,7 +845,7 @@ function buildModel(parsed) {
       cal,
       raw: row,
       // filled below
-      chainage: null, targetCost: 0, actualCost: 0, assignments: [],
+      chainage: null, targetCost: 0, actualCost: 0, assignments: [], codes: [],
       milestone: false, origDays: undefined, floatDays: undefined,
     };
     task.milestone = task.taskType === 'TT_Mile' || task.taskType === 'TT_FinMile'
@@ -862,6 +862,37 @@ function buildModel(parsed) {
     tasks.push(task);
     taskById.set(task.id, task);
     taskByCode.set(task.code, task);
+  }
+
+  // --- activity codes (ACTVTYPE / ACTVCODE / TASKACTV) ---
+  // The grouping axis planners actually report by (Area / Phase / Discipline),
+  // distinct from WBS.
+  const codeTypes = new Map(); // actv_code_type_id -> {id, name, scope, values: Map}
+  for (const row of t('ACTVTYPE')) {
+    codeTypes.set(row.actv_code_type_id, {
+      id: row.actv_code_type_id,
+      name: row.actv_code_type || `Code ${row.actv_code_type_id}`,
+      scope: row.actv_code_type_scope,
+      values: new Map(),
+    });
+  }
+  const codeValues = new Map(); // actv_code_id -> {id, typeId, shortName, name}
+  for (const row of t('ACTVCODE')) {
+    const v = {
+      id: row.actv_code_id,
+      typeId: row.actv_code_type_id,
+      shortName: row.short_name || '',
+      name: row.actv_code_name || row.short_name || row.actv_code_id,
+      parentId: row.parent_actv_code_id,
+    };
+    codeValues.set(v.id, v);
+    codeTypes.get(v.typeId)?.values.set(v.id, v);
+  }
+  for (const row of t('TASKACTV')) {
+    const task = taskById.get(row.task_id);
+    const value = codeValues.get(row.actv_code_id);
+    const type = codeTypes.get(row.actv_code_type_id);
+    if (task && value && type) task.codes.push({ type, value });
   }
 
   // --- relationships ---
@@ -911,6 +942,7 @@ function buildModel(parsed) {
     project, dataDate, dataDateSource, projectCal,
     calendars, defaultCal: fallbackCal,
     wbsRoot, wbsById,
+    codeTypes, codeValues,
     tasks, taskById, taskByCode,
     preds, rsrcById, assignments,
     tablesSummary,
@@ -1004,6 +1036,39 @@ function runCPM(model, { durationOverride = null } = {}) {
   for (const n of order) n.tf = n.ls - n.es;
 
   return { cyclic: false, nodes, order, finishDays };
+}
+
+// Longest path — the driving chain to project finish, walked backward from
+// the latest-finishing node through whichever predecessor actually sets each
+// node's early start (P6's own definition of "critical" on the longest path,
+// distinct from a total-float filter).
+function longestPath(model) {
+  const r = runCPM(model);
+  if (r.cyclic) return { cyclic: true, path: [] };
+  let cur = null;
+  for (const n of r.order) if (!cur || n.ef > cur.ef) cur = n;
+  const path = [];
+  const seen = new Set();
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    path.push(cur.id);
+    let driver = null;
+    for (const e of cur.preds) {
+      const { from, type, lag } = e;
+      let minEs;
+      switch (type) {
+        case 'PR_SS': minEs = from.es + lag; break;
+        case 'PR_FF': minEs = from.ef + lag - cur.d; break;
+        case 'PR_SF': minEs = from.es + lag - cur.d; break;
+        default:      minEs = from.ef + lag;
+      }
+      // the predecessor that binds this node's early start drives it
+      if (Math.abs(minEs - cur.es) < 1e-9 && (!driver || from.ef > driver.ef)) driver = from;
+    }
+    cur = driver;
+  }
+  path.reverse();
+  return { cyclic: false, path, finishDays: r.finishDays };
 }
 
 // DCMA check 12 — Critical Path Test: extend a driving activity's duration
@@ -1118,11 +1183,46 @@ function computeEVM(model, gran = 'month') {
   const tcpi = bac - ac !== 0 ? (bac - ev) / (bac - ac) : undefined;
   const earnedPct = bac > 0 ? ev / bac : undefined;
 
+  const es = earnedSchedule(pv, ev, asOf, gran);
+
   return {
     gran, pv, pvAtDD,
     evPoint: asOf !== undefined ? { date: asOf, value: ev } : null,
     acPoint: asOf !== undefined ? { date: asOf, value: ac } : null,
-    bac, ev, ac, spi, cpi, eac, etc, vac, tcpi, earnedPct,
+    bac, ev, ac, spi, cpi, eac, etc, vac, tcpi, earnedPct, es,
+  };
+}
+
+// Earned Schedule per Lipke: ES = the point on the PLAN's own timeline at
+// which cumulative PV equals today's EV (whole periods + linear fraction);
+// AT = periods elapsed from plan start to the data date. SPI(t) = ES / AT,
+// SV(t) = ES − AT, in period units. Unlike cost-based SPI, SPI(t) does not
+// converge to 1.0 as the project limps to completion.
+function earnedSchedule(pv, ev, asOf, gran = 'month') {
+  if (!pv.length) return { value: null, reason: 'No time-phased plan (no costed activities).' };
+  if (asOf === undefined) return { value: null, reason: 'No data date in file.' };
+  const unit = gran === 'week' ? 'weeks' : 'months';
+  // AT: periods from plan start to the data date (fractional)
+  const first = pv[0].start;
+  const last = pv[pv.length - 1].start;
+  const periodMs = pv.length > 1 ? (last - first) / (pv.length - 1) : DAY_MS * 30;
+  const at = (asOf - first) / periodMs;
+  if (at <= 0) return { value: null, reason: 'Data date precedes the plan start — AT is 0.' };
+  // ES: whole periods where cum PV <= EV, plus interpolated fraction
+  let es;
+  if (ev <= 0) es = 0;
+  else if (ev >= pv[pv.length - 1].cum) es = pv.length;
+  else {
+    let n = 0;
+    while (n < pv.length && pv[n].cum <= ev) n++;
+    const prevCum = n === 0 ? 0 : pv[n - 1].cum;
+    const stepCum = pv[n].cum - prevCum;
+    es = n + (stepCum > 0 ? (ev - prevCum) / stepCum : 0);
+  }
+  return {
+    value: es / at,     // SPI(t)
+    es, at, unit,
+    svt: es - at,       // SV(t): negative = periods behind, in time units
   };
 }
 
@@ -1484,7 +1584,13 @@ function compareModels(current, baseline) {
       slipDays = workingDaysBetween(t.cal, Math.min(baseFinish, curFinish), Math.max(baseFinish, curFinish));
       if (dayFloor(curFinish) < dayFloor(baseFinish)) slipDays = -slipDays;
     }
-    matched.push({ code: t.code, cur: t, base: b, slipDays, curFinish, baseFinish });
+    // float erosion vs baseline: negative = float consumed (schedule stress
+    // even where the finish date hasn't moved yet)
+    let floatDelta;
+    if (t.floatDays !== undefined && b.floatDays !== undefined) {
+      floatDelta = +(t.floatDays - b.floatDays).toFixed(1);
+    }
+    matched.push({ code: t.code, cur: t, base: b, slipDays, curFinish, baseFinish, floatDelta });
   }
   for (const b of baseline.tasks) {
     if (!current.taskByCode.has(b.code)) removed.push(b);
@@ -1716,8 +1822,8 @@ function floatBands(model) {
 // GENERATED by tools/make-fixture.js — do not edit by hand.
 const DEMO_NAME = 'najd-s2-update.xer';
 const BASELINE_NAME = 'najd-s2-baseline.xer';
-const DEMO_XER = "ERMHDR\t19.12\t2026-07-01\tProject\tadmin\tPRISM demo export\tdbxDatabaseNoName\tProject Management\tSAR\n%T\tCALENDAR\n%F\tclndr_id\tclndr_name\tday_hr_cnt\tclndr_data\n%R\t100\tNAJD Site — Sun-Thu 8h (KSA)\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|07:00|f|15:00)())))(0||2()((0||0(s|07:00|f|15:00)())))(0||3()((0||0(s|07:00|f|15:00)())))(0||4()((0||0(s|07:00|f|15:00)())))(0||5()((0||0(s|07:00|f|15:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()((0||0(d|45923)())(0||1(d|46100)())(0||2(d|46103)())(0||3(d|46104)())(0||4(d|46099)((0||0(s|07:00|f|11:00)())))))))\n%R\t101\tNAJD Office — Sun-Thu 8h\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|08:00|f|16:00)())))(0||2()((0||0(s|08:00|f|16:00)())))(0||3()((0||0(s|08:00|f|16:00)())))(0||4()((0||0(s|08:00|f|16:00)())))(0||5()((0||0(s|08:00|f|16:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()())))\n%T\tPROJECT\n%F\tproj_id\tproj_short_name\tplan_start_date\tplan_end_date\tlast_recalc_date\tlast_schedule_date\tclndr_id\n%R\t1001\tNAJD-S2\t2025-09-07 07:00\t2026-09-09 15:00\t2025-08-15 08:00\t2026-07-01 07:00\t100\n%T\tPROJWBS\n%F\twbs_id\tparent_wbs_id\twbs_short_name\twbs_name\tproj_node_flag\n%R\t5000\t\tNAJD-S2\tNAJD Water Transmission — Section 2\tY\n%R\t5010\t5000\tGEN\tGeneral & Milestones\tN\n%R\t5020\t5000\tPROC\tProcurement\tN\n%R\t5030\t5000\tPIPE\tPipeline Works\tN\n%R\t5031\t5030\tSEG-A\tSegment A — KP512+000 to KP518+000\tN\n%R\t5032\t5030\tSEG-B\tSegment B — KP518+000 to KP524+000\tN\n%R\t5033\t5030\tSEG-C\tSegment C — KP524+000 to KP530+000\tN\n%R\t5034\t5030\tSEG-D\tSegment D — KP530+000 to KP536+000\tN\n%R\t5040\t5000\tSTX\tStations & Crossings\tN\n%R\t5050\t5000\tTC\tTesting & Commissioning\tN\n%T\tRSRC\n%F\trsrc_id\trsrc_short_name\trsrc_name\trsrc_type\n%R\t201\tEW-CREW\tEarthworks Crew\tRT_Labor\n%R\t202\tWELD-CREW\tWelding & NDT Crew\tRT_Labor\n%R\t203\tSIDEBOOM\tSideboom Spread\tRT_Equip\n%R\t204\tEXCAV\t30t Excavator Fleet\tRT_Equip\n%R\t205\tPIPE-48\tPipe 48in CS API 5L\tRT_Mat\n%R\t206\tHDD-RIG\tHDD Maxi Rig\tRT_Equip\n%R\t207\tQAQC\tQA/QC Engineers\tRT_Labor\n%T\tRSRCRATE\n%F\trsrc_rate_id\trsrc_id\tmax_qty_per_hr\n%R\t301\t201\t2\n%R\t302\t202\t2\n%R\t303\t203\t1\n%R\t304\t206\t1\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10001\tA-000\tNotice to Proceed\t5010\t1001\tTT_Mile\tTK_Complete\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 15:00\t\t0\t100\t\t\t100\n%R\t10002\tA-010\tMobilization & Temporary Works\t5010\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2025-10-05 15:00\t2025-09-07 07:00\t2025-10-05 15:00\t\t0\t100\t\t\t100\n%R\t10003\tA-020\tSite Facilities & Access Roads\t5010\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-11-16 15:00\t2025-10-06 07:00\t2025-11-16 15:00\t\t0\t100\t\t\t100\n%R\t10004\tP-010\tPipe Mill Order & Manufacture\t5020\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2026-02-08 15:00\t2025-09-07 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t101\n%R\t10005\tP-020\tPipe Delivery Lot 1 — Segments A and B\t5020\t1001\tTT_Task\tTK_Complete\t2026-01-12 07:00\t2026-02-01 15:00\t2026-01-12 07:00\t2026-02-01 15:00\t\t0\t100\t\t\t101\n%R\t10006\tP-030\tPipe Delivery Lot 2 — Segments C and D\t5020\t1001\tTT_Task\tTK_Active\t2026-05-07 07:00\t2026-05-27 15:00\t2026-06-18 07:00\t\t160\t48\t60\t\t\t101\n%R\t10007\tP-040\tValves & Fittings Procurement\t5020\t1001\tTT_Task\tTK_NotStart\t2026-06-18 07:00\t2026-07-15 15:00\t\t\t480\t160\t\t\t\t101\n%R\t10008\tS31-010\tSurvey & Set-out KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-10-12 15:00\t2025-10-06 07:00\t2025-10-12 15:00\t\t0\t100\t\t\t100\n%R\t10009\tS31-020\tROW Clearing & Grading KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-13 07:00\t2025-10-28 15:00\t2025-10-13 07:00\t2025-10-28 15:00\t\t0\t100\t\t\t100\n%R\t10010\tS31-030\tTrench Excavation KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-29 07:00\t2025-12-02 15:00\t2025-10-29 07:00\t2025-12-02 15:00\t\t0\t100\t\t\t100\n%R\t10011\tS31-040\tPipe Stringing KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-05 07:00\t2025-11-18 15:00\t2025-11-05 07:00\t2025-11-18 15:00\t\t0\t100\t\t\t100\n%R\t10012\tS31-050\tWelding & NDT KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-19 07:00\t2025-12-30 15:00\t2025-11-19 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10013\tS31-060\tLower-in & Backfill KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-01-25 15:00\t2025-12-31 07:00\t2026-01-25 15:00\t\t0\t100\t\t\t100\n%R\t10014\tS31-070\tReinstatement KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2026-01-26 07:00\t2026-02-08 15:00\t2026-01-26 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t100\n%R\t10015\tS32-010\tSurvey & Set-out KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-08 07:00\t2025-12-14 15:00\t2025-12-08 07:00\t2025-12-14 15:00\t\t0\t100\t\t\t100\n%R\t10016\tS32-020\tROW Clearing & Grading KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-15 07:00\t2025-12-30 15:00\t2025-12-15 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10017\tS32-030\tTrench Excavation KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-02-03 15:00\t2025-12-31 07:00\t2026-02-03 15:00\t\t0\t100\t\t\t100\n%R\t10018\tS32-040\tPipe Stringing KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-07 07:00\t2026-01-20 15:00\t2026-01-07 07:00\t2026-01-20 15:00\t\t0\t100\t\t\t100\n%R\t10019\tS32-050\tWelding & NDT KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-21 07:00\t2026-03-03 15:00\t2026-01-21 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10020\tS32-060\tLower-in & Backfill KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-01 15:00\t2026-03-04 07:00\t2026-04-01 15:00\t\t0\t100\t\t\t100\n%R\t10021\tS32-070\tReinstatement KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-04-02 07:00\t2026-04-15 15:00\t2026-04-02 07:00\t2026-04-15 15:00\t\t0\t100\t\t\t100\n%R\t10022\tS33-010\tSurvey & Set-out KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-09 07:00\t2026-02-15 15:00\t2026-02-09 07:00\t2026-02-15 15:00\t\t0\t100\t\t\t100\n%T\tTASKPRED\n%F\ttask_pred_id\ttask_id\tpred_task_id\tpred_type\tlag_hr_cnt\n%R\t20001\t10002\t10001\tPR_FS\t0\n%R\t20002\t10003\t10002\tPR_FS\t0\n%R\t20003\t10004\t10001\tPR_FS\t0\n%R\t20004\t10005\t10004\tPR_FF\t80\n%R\t20005\t10006\t10004\tPR_FS\t0\n%R\t20006\t10007\t10004\tPR_FS\t0\n%R\t20007\t10008\t10003\tPR_FS\t0\n%R\t20008\t10009\t10008\tPR_FS\t0\n%R\t20009\t10010\t10009\tPR_FS\t0\n%R\t20010\t10011\t10010\tPR_SS\t40\n%R\t20011\t10011\t10005\tPR_FS\t0\n%R\t20012\t10012\t10011\tPR_FS\t0\n%R\t20013\t10013\t10012\tPR_FS\t0\n%R\t20014\t10014\t10013\tPR_FS\t0\n%R\t20015\t10015\t10009\tPR_FS\t0\n%R\t20016\t10016\t10015\tPR_FS\t0\n%R\t20017\t10017\t10016\tPR_FS\t0\n%R\t20018\t10018\t10017\tPR_SS\t40\n%R\t20019\t10019\t10018\tPR_FS\t0\n%R\t20020\t10020\t10019\tPR_FS\t0\n%R\t20021\t10021\t10020\tPR_FS\t0\n%R\t20022\t10022\t10016\tPR_FS\t0\n%R\t20023\t10023\t10022\tPR_FS\t0\n%R\t20024\t10024\t10023\tPR_FS\t0\n%R\t20025\t10025\t10024\tPR_SS\t40\n%R\t20026\t10026\t10025\tPR_FS\t0\n%R\t20027\t10027\t10026\tPR_FS\t0\n%R\t20028\t10028\t10027\tPR_FS\t0\n%R\t20029\t10029\t10023\tPR_FS\t0\n%R\t20030\t10030\t10029\tPR_FS\t0\n%R\t20031\t10031\t10030\tPR_FS\t0\n%R\t20032\t10032\t10031\tPR_SS\t40\n%R\t20033\t10032\t10006\tPR_FS\t0\n%R\t20034\t10033\t10032\tPR_FS\t0\n%R\t20035\t10034\t10033\tPR_FS\t0\n%R\t20036\t10035\t10034\tPR_FS\t0\n%R\t20037\t10036\t10024\tPR_FS\t-40\n%R\t20038\t10037\t10035\tPR_FS\t0\n%R\t20039\t10039\t10034\tPR_FS\t0\n%R\t20040\t10039\t10028\tPR_FS\t0\n%R\t20041\t10039\t10014\tPR_FS\t0\n%R\t20042\t10039\t10021\tPR_FS\t0\n%R\t20043\t10039\t10036\tPR_FS\t0\n%R\t20044\t10039\t10007\tPR_FS\t0\n%R\t20045\t10040\t10026\tPR_FS\t0\n%R\t20046\t10041\t10039\tPR_FS\t0\n%R\t20047\t10041\t10040\tPR_FS\t0\n%R\t20048\t10042\t10041\tPR_FS\t0\n%R\t20049\t10042\t10038\tPR_FS\t0\n%R\t20050\t10043\t10042\tPR_FS\t80\n%T\tTASKRSRC\n%F\ttaskrsrc_id\ttask_id\trsrc_id\ttarget_cost\ttarget_qty\tact_reg_cost\tact_ot_cost\tact_reg_qty\tact_ot_qty\tremain_qty\n%R\t30001\t10002\t201\t1500000\t160\t1551000\t99000\t160\t\t0\n%R\t30002\t10003\t204\t1200000\t240\t1184400\t75600\t240\t\t0\n%R\t30003\t10004\t205\t2000000\t0\t1917600\t122400\t\t\t0\n%R\t30004\t10005\t205\t800000\t0\t752000\t48000\t\t\t0\n%R\t30005\t10006\t205\t800000\t0\t466240\t29760\t\t\t0\n%R\t30006\t10007\t207\t600000\t0\t\t\t\t\t0\n%R\t30007\t10008\t207\t120000\t40\t121824\t7776\t40\t\t0\n%R\t30008\t10009\t201\t300000\t96\t304560\t19440\t96\t\t0\n%R\t30009\t10009\t204\t150000\t96\t152280\t9720\t96\t\t0\n%R\t30010\t10010\t201\t800000\t200\t812160\t51840\t200\t\t0\n%R\t30011\t10010\t204\t600000\t200\t609120\t38880\t200\t\t0\n%R\t30012\t10011\t203\t600000\t80\t609120\t38880\t80\t\t0\n%R\t30013\t10011\t205\t3200000\t6000\t3248640\t207360\t6000\t\t0\n%R\t30014\t10012\t202\t1800000\t240\t1827360\t116640\t240\t\t0\n%R\t30015\t10013\t203\t500000\t144\t507600\t32400\t144\t\t0\n%R\t30016\t10013\t201\t400000\t144\t406080\t25920\t144\t\t0\n%R\t30017\t10014\t201\t400000\t80\t406080\t25920\t80\t\t0\n%R\t30018\t10015\t207\t120000\t40\t126336\t8064\t40\t\t0\n%R\t30019\t10016\t201\t300000\t96\t315840\t20160\t96\t\t0\n%R\t30020\t10016\t204\t150000\t96\t157920\t10080\t96\t\t0\n%R\t30021\t10017\t201\t800000\t200\t842240\t53760\t200\t\t0\n%R\t30022\t10017\t204\t600000\t200\t631680\t40320\t200\t\t0\n%R\t30023\t10018\t203\t600000\t80\t631680\t40320\t80\t\t0\n%R\t30024\t10018\t205\t3200000\t6000\t3368960\t215040\t6000\t\t0\n%R\t30025\t10019\t202\t1800000\t240\t1895040\t120960\t240\t\t0\n%R\t30026\t10020\t203\t500000\t144\t526400\t33600\t144\t\t0\n%R\t30027\t10020\t201\t400000\t144\t421120\t26880\t144\t\t0\n%R\t30028\t10021\t201\t400000\t80\t421120\t26880\t80\t\t0\n%R\t30029\t10022\t207\t120000\t40\t122952\t7848\t40\t\t0\n%R\t30030\t10023\t201\t300000\t96\t307380\t19620\t96\t\t0\n%R\t30031\t10023\t204\t150000\t96\t153690\t9810\t96\t\t0\n%R\t30032\t10024\t201\t800000\t200\t819680\t52320\t200\t\t0\n%R\t30033\t10024\t204\t600000\t200\t614760\t39240\t200\t\t0\n%R\t30034\t10025\t203\t600000\t80\t614760\t39240\t80\t\t0\n%R\t30035\t10025\t205\t3200000\t6000\t3278720\t209280\t6000\t\t0\n%R\t30036\t10026\t202\t1800000\t240\t963636\t61509\t137\t\t103\n%R\t30037\t10027\t203\t500000\t144\t\t\t\t\t144\n%R\t30038\t10027\t201\t400000\t144\t\t\t\t\t144\n%R\t30039\t10028\t201\t400000\t80\t\t\t\t\t80\n%R\t30040\t10029\t207\t120000\t40\t119568\t7632\t40\t\t0\n%R\t30041\t10030\t201\t300000\t96\t85192\t5438\t29\t\t67\n%R\t30042\t10030\t204\t150000\t96\t42596\t2719\t29\t\t67\n%R\t30043\t10031\t201\t800000\t200\t\t\t\t\t200\n%R\t30044\t10031\t204\t600000\t200\t\t\t\t\t200\n%R\t30045\t10032\t203\t600000\t80\t\t\t\t\t80\n%R\t30046\t10032\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30047\t10033\t202\t1800000\t368\t\t\t\t\t368\n%R\t30048\t10034\t203\t500000\t144\t\t\t\t\t144\n%R\t30049\t10034\t201\t400000\t144\t\t\t\t\t144\n%R\t30050\t10035\t201\t400000\t80\t\t\t\t\t80\n%R\t30051\t10036\t206\t2500000\t280\t1292500\t82500\t154\t\t126\n%R\t30052\t10037\t202\t700000\t80\t\t\t\t\t80\n%R\t30053\t10038\t207\t900000\t200\t\t\t\t\t200\n%R\t30054\t10039\t207\t500000\t120\t\t\t\t\t120\n%R\t30055\t10040\t202\t300000\t40\t\t\t\t\t40\n%R\t30056\t10041\t207\t400000\t96\t\t\t\t\t96\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10023\tS33-020\tROW Clearing & Grading KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-16 07:00\t2026-03-03 15:00\t2026-02-16 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10024\tS33-030\tTrench Excavation KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-12 15:00\t2026-03-04 07:00\t2026-04-12 15:00\t\t0\t100\t\t\t100\n%R\t10025\tS33-040\tPipe Stringing KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-11 07:00\t2026-03-29 15:00\t2026-03-11 07:00\t2026-03-29 15:00\t\t0\t100\t\t\t100\n%R\t10026\tS33-050\tWelding & NDT KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Active\t2026-03-30 07:00\t2026-05-10 15:00\t2026-04-09 07:00\t\t0\t120\t55\t\t\t100\n%R\t10027\tS33-060\tLower-in & Backfill KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-03 15:00\t\t\t0\t144\t\t\t\t100\n%R\t10028\tS33-070\tReinstatement KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-06-04 07:00\t2026-06-17 15:00\t\t\t40\t80\t\t\t\t100\n%R\t10029\tS34-010\tSurvey & Set-out KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Complete\t2026-04-16 07:00\t2026-04-22 15:00\t2026-04-16 07:00\t2026-04-22 15:00\t\t0\t100\t\t\t100\n%R\t10030\tS34-020\tROW Clearing & Grading KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Active\t2026-04-23 07:00\t2026-05-10 15:00\t2026-05-07 07:00\t\t-40\t80\t30\t\t\t100\n%R\t10031\tS34-030\tTrench Excavation KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-14 15:00\t\t\t-40\t200\t\t\t\t100\n%R\t10032\tS34-040\tPipe Stringing KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-18 07:00\t2026-05-31 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10033\tS34-050\tWelding & NDT KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-06-01 07:00\t2026-08-03 15:00\t\t\t-40\t368\t\t\t\t100\n%R\t10034\tS34-060\tLower-in & Backfill KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-07-13 07:00\t2026-08-05 15:00\t\t\t-40\t144\t\t\t\t100\n%R\t10035\tS34-070\tReinstatement KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-08-19 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10036\tC-010\tWadi Hanifa HDD Crossing KP529+800\t5040\t1001\tTT_Task\tTK_Active\t2026-03-26 07:00\t2026-05-13 15:00\t2026-03-26 07:00\t\t24\t160\t45\t\t\t100\n%R\t10037\tC-020\tPump Station 2 Tie-in KP536+000\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-27 07:00\t2026-09-09 15:00\t\t\t40\t80\t\tCS_MEO\t2026-09-02 15:00\t100\n%R\t10038\tC-030\tCathodic Protection System — Section 2 Mainline\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-09-09 15:00\t\t\t120\t200\t\t\t\t100\n%R\t10039\tT-010\tHydrostatic Test — Section 2 Mainline\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-30 07:00\t2026-08-19 15:00\t\t\t-40\t120\t\t\t\t100\n%R\t10040\tT-020\tGolden Weld Tie-in KP518+400\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-08-27 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10041\tT-030\tPre-commissioning & Dewatering\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-09-07 15:00\t\t\t-40\t96\t\t\t\t100\n%R\t10042\tM-100\tSection 2 Mechanical Completion\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\tCS_MANDFIN\t2026-09-01 15:00\t100\n%R\t10043\tM-110\tHandover to Operations\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\t\t\t100\n%E\n";
-const BASELINE_XER = "ERMHDR\t19.12\t2025-08-15\tProject\tadmin\tPRISM demo export\tdbxDatabaseNoName\tProject Management\tSAR\n%T\tCALENDAR\n%F\tclndr_id\tclndr_name\tday_hr_cnt\tclndr_data\n%R\t100\tNAJD Site — Sun-Thu 8h (KSA)\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|07:00|f|15:00)())))(0||2()((0||0(s|07:00|f|15:00)())))(0||3()((0||0(s|07:00|f|15:00)())))(0||4()((0||0(s|07:00|f|15:00)())))(0||5()((0||0(s|07:00|f|15:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()((0||0(d|45923)())(0||1(d|46100)())(0||2(d|46103)())(0||3(d|46104)())(0||4(d|46099)((0||0(s|07:00|f|11:00)())))))))\n%R\t101\tNAJD Office — Sun-Thu 8h\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|08:00|f|16:00)())))(0||2()((0||0(s|08:00|f|16:00)())))(0||3()((0||0(s|08:00|f|16:00)())))(0||4()((0||0(s|08:00|f|16:00)())))(0||5()((0||0(s|08:00|f|16:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()())))\n%T\tPROJECT\n%F\tproj_id\tproj_short_name\tplan_start_date\tplan_end_date\tlast_recalc_date\tlast_schedule_date\tclndr_id\n%R\t1001\tNAJD-S2\t2025-09-07 07:00\t2026-08-05 15:00\t2025-08-15 08:00\t\t100\n%T\tPROJWBS\n%F\twbs_id\tparent_wbs_id\twbs_short_name\twbs_name\tproj_node_flag\n%R\t5000\t\tNAJD-S2\tNAJD Water Transmission — Section 2\tY\n%R\t5010\t5000\tGEN\tGeneral & Milestones\tN\n%R\t5020\t5000\tPROC\tProcurement\tN\n%R\t5030\t5000\tPIPE\tPipeline Works\tN\n%R\t5031\t5030\tSEG-A\tSegment A — KP512+000 to KP518+000\tN\n%R\t5032\t5030\tSEG-B\tSegment B — KP518+000 to KP524+000\tN\n%R\t5033\t5030\tSEG-C\tSegment C — KP524+000 to KP530+000\tN\n%R\t5034\t5030\tSEG-D\tSegment D — KP530+000 to KP536+000\tN\n%R\t5040\t5000\tSTX\tStations & Crossings\tN\n%R\t5050\t5000\tTC\tTesting & Commissioning\tN\n%T\tRSRC\n%F\trsrc_id\trsrc_short_name\trsrc_name\trsrc_type\n%R\t201\tEW-CREW\tEarthworks Crew\tRT_Labor\n%R\t202\tWELD-CREW\tWelding & NDT Crew\tRT_Labor\n%R\t203\tSIDEBOOM\tSideboom Spread\tRT_Equip\n%R\t204\tEXCAV\t30t Excavator Fleet\tRT_Equip\n%R\t205\tPIPE-48\tPipe 48in CS API 5L\tRT_Mat\n%R\t206\tHDD-RIG\tHDD Maxi Rig\tRT_Equip\n%R\t207\tQAQC\tQA/QC Engineers\tRT_Labor\n%T\tRSRCRATE\n%F\trsrc_rate_id\trsrc_id\tmax_qty_per_hr\n%R\t301\t201\t2\n%R\t302\t202\t2\n%R\t303\t203\t1\n%R\t304\t206\t1\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10001\tA-000\tNotice to Proceed\t5010\t1001\tTT_Mile\tTK_NotStart\t2025-09-07 07:00\t2025-09-07 07:00\t\t\t80\t0\t\t\t\t100\n%R\t10002\tA-010\tMobilization & Temporary Works\t5010\t1001\tTT_Task\tTK_NotStart\t2025-09-07 07:00\t2025-10-05 15:00\t\t\t80\t160\t\t\t\t100\n%R\t10003\tA-020\tSite Facilities & Access Roads\t5010\t1001\tTT_Task\tTK_NotStart\t2025-10-06 07:00\t2025-11-16 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10004\tP-010\tPipe Mill Order & Manufacture\t5020\t1001\tTT_Task\tTK_NotStart\t2025-09-07 07:00\t2026-02-08 15:00\t\t\t80\t880\t\t\t\t101\n%R\t10005\tP-020\tPipe Delivery Lot 1 — Segments A and B\t5020\t1001\tTT_Task\tTK_NotStart\t2026-01-12 07:00\t2026-02-01 15:00\t\t\t80\t120\t\t\t\t101\n%R\t10006\tP-030\tPipe Delivery Lot 2 — Segments C and D\t5020\t1001\tTT_Task\tTK_NotStart\t2026-04-09 07:00\t2026-04-29 15:00\t\t\t80\t120\t\t\t\t101\n%R\t10007\tP-040\tValves & Fittings Procurement\t5020\t1001\tTT_Task\tTK_NotStart\t2026-05-21 07:00\t2026-06-17 15:00\t\t\t480\t160\t\t\t\t101\n%R\t10008\tS31-010\tSurvey & Set-out KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-06 07:00\t2025-10-12 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10009\tS31-020\tROW Clearing & Grading KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-13 07:00\t2025-10-28 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10010\tS31-030\tTrench Excavation KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-29 07:00\t2025-12-02 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10011\tS31-040\tPipe Stringing KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-11-05 07:00\t2025-11-18 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10012\tS31-050\tWelding & NDT KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-11-19 07:00\t2025-12-30 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10013\tS31-060\tLower-in & Backfill KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-12-31 07:00\t2026-01-25 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10014\tS31-070\tReinstatement KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2026-01-26 07:00\t2026-02-08 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10015\tS31-025\tDewatering Trial KP513+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-20 07:00\t2025-10-29 15:00\t\t\t80\t64\t\t\t\t100\n%R\t10016\tS32-010\tSurvey & Set-out KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-01 07:00\t2025-12-07 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10017\tS32-020\tROW Clearing & Grading KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-08 07:00\t2025-12-23 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10018\tS32-030\tTrench Excavation KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-24 07:00\t2026-01-27 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10019\tS32-040\tPipe Stringing KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-31 07:00\t2026-01-13 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10020\tS32-050\tWelding & NDT KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-01-14 07:00\t2026-02-24 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10021\tS32-060\tLower-in & Backfill KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-02-25 07:00\t2026-03-25 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10022\tS32-070\tReinstatement KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-03-26 07:00\t2026-04-08 15:00\t\t\t80\t80\t\t\t\t100\n%T\tTASKPRED\n%F\ttask_pred_id\ttask_id\tpred_task_id\tpred_type\tlag_hr_cnt\n%R\t20001\t10002\t10001\tPR_FS\t0\n%R\t20002\t10003\t10002\tPR_FS\t0\n%R\t20003\t10004\t10001\tPR_FS\t0\n%R\t20004\t10005\t10004\tPR_FF\t80\n%R\t20005\t10006\t10004\tPR_FS\t0\n%R\t20006\t10007\t10004\tPR_FS\t0\n%R\t20007\t10008\t10003\tPR_FS\t0\n%R\t20008\t10009\t10008\tPR_FS\t0\n%R\t20009\t10010\t10009\tPR_FS\t0\n%R\t20010\t10011\t10010\tPR_SS\t40\n%R\t20011\t10011\t10005\tPR_FS\t0\n%R\t20012\t10012\t10011\tPR_FS\t0\n%R\t20013\t10013\t10012\tPR_FS\t0\n%R\t20014\t10014\t10013\tPR_FS\t0\n%R\t20015\t10015\t10009\tPR_FS\t0\n%R\t20016\t10016\t10009\tPR_FS\t0\n%R\t20017\t10017\t10016\tPR_FS\t0\n%R\t20018\t10018\t10017\tPR_FS\t0\n%R\t20019\t10019\t10018\tPR_SS\t40\n%R\t20020\t10020\t10019\tPR_FS\t0\n%R\t20021\t10021\t10020\tPR_FS\t0\n%R\t20022\t10022\t10021\tPR_FS\t0\n%R\t20023\t10023\t10017\tPR_FS\t0\n%R\t20024\t10024\t10023\tPR_FS\t0\n%R\t20025\t10025\t10024\tPR_FS\t0\n%R\t20026\t10026\t10025\tPR_SS\t40\n%R\t20027\t10027\t10026\tPR_FS\t0\n%R\t20028\t10028\t10027\tPR_FS\t0\n%R\t20029\t10029\t10028\tPR_FS\t0\n%R\t20030\t10030\t10024\tPR_FS\t0\n%R\t20031\t10031\t10030\tPR_FS\t0\n%R\t20032\t10032\t10031\tPR_FS\t0\n%R\t20033\t10033\t10032\tPR_SS\t40\n%R\t20034\t10033\t10006\tPR_FS\t0\n%R\t20035\t10034\t10033\tPR_FS\t0\n%R\t20036\t10035\t10034\tPR_FS\t0\n%R\t20037\t10036\t10035\tPR_FS\t0\n%R\t20038\t10037\t10025\tPR_FS\t-40\n%R\t20039\t10038\t10036\tPR_FS\t0\n%R\t20040\t10039\t10035\tPR_FS\t0\n%R\t20041\t10039\t10029\tPR_FS\t0\n%R\t20042\t10039\t10014\tPR_FS\t0\n%R\t20043\t10039\t10022\tPR_FS\t0\n%R\t20044\t10039\t10037\tPR_FS\t0\n%R\t20045\t10039\t10007\tPR_FS\t0\n%R\t20046\t10040\t10027\tPR_FS\t0\n%R\t20047\t10041\t10039\tPR_FS\t0\n%R\t20048\t10041\t10040\tPR_FS\t0\n%R\t20049\t10042\t10041\tPR_FS\t0\n%R\t20050\t10043\t10042\tPR_FS\t80\n%T\tTASKRSRC\n%F\ttaskrsrc_id\ttask_id\trsrc_id\ttarget_cost\ttarget_qty\tact_reg_cost\tact_ot_cost\tact_reg_qty\tact_ot_qty\tremain_qty\n%R\t30001\t10002\t201\t1500000\t160\t\t\t\t\t160\n%R\t30002\t10003\t204\t1200000\t240\t\t\t\t\t240\n%R\t30003\t10004\t205\t2000000\t0\t\t\t\t\t0\n%R\t30004\t10005\t205\t800000\t0\t\t\t\t\t0\n%R\t30005\t10006\t205\t800000\t0\t\t\t\t\t0\n%R\t30006\t10007\t207\t600000\t0\t\t\t\t\t0\n%R\t30007\t10008\t207\t120000\t40\t\t\t\t\t40\n%R\t30008\t10009\t201\t300000\t96\t\t\t\t\t96\n%R\t30009\t10009\t204\t150000\t96\t\t\t\t\t96\n%R\t30010\t10010\t201\t800000\t200\t\t\t\t\t200\n%R\t30011\t10010\t204\t600000\t200\t\t\t\t\t200\n%R\t30012\t10011\t203\t600000\t80\t\t\t\t\t80\n%R\t30013\t10011\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30014\t10012\t202\t1800000\t240\t\t\t\t\t240\n%R\t30015\t10013\t203\t500000\t144\t\t\t\t\t144\n%R\t30016\t10013\t201\t400000\t144\t\t\t\t\t144\n%R\t30017\t10014\t201\t400000\t80\t\t\t\t\t80\n%R\t30018\t10015\t204\t250000\t64\t\t\t\t\t64\n%R\t30019\t10016\t207\t120000\t40\t\t\t\t\t40\n%R\t30020\t10017\t201\t300000\t96\t\t\t\t\t96\n%R\t30021\t10017\t204\t150000\t96\t\t\t\t\t96\n%R\t30022\t10018\t201\t800000\t200\t\t\t\t\t200\n%R\t30023\t10018\t204\t600000\t200\t\t\t\t\t200\n%R\t30024\t10019\t203\t600000\t80\t\t\t\t\t80\n%R\t30025\t10019\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30026\t10020\t202\t1800000\t240\t\t\t\t\t240\n%R\t30027\t10021\t203\t500000\t144\t\t\t\t\t144\n%R\t30028\t10021\t201\t400000\t144\t\t\t\t\t144\n%R\t30029\t10022\t201\t400000\t80\t\t\t\t\t80\n%R\t30030\t10023\t207\t120000\t40\t\t\t\t\t40\n%R\t30031\t10024\t201\t300000\t96\t\t\t\t\t96\n%R\t30032\t10024\t204\t150000\t96\t\t\t\t\t96\n%R\t30033\t10025\t201\t800000\t200\t\t\t\t\t200\n%R\t30034\t10025\t204\t600000\t200\t\t\t\t\t200\n%R\t30035\t10026\t203\t600000\t80\t\t\t\t\t80\n%R\t30036\t10026\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30037\t10027\t202\t1800000\t240\t\t\t\t\t240\n%R\t30038\t10028\t203\t500000\t144\t\t\t\t\t144\n%R\t30039\t10028\t201\t400000\t144\t\t\t\t\t144\n%R\t30040\t10029\t201\t400000\t80\t\t\t\t\t80\n%R\t30041\t10030\t207\t120000\t40\t\t\t\t\t40\n%R\t30042\t10031\t201\t300000\t96\t\t\t\t\t96\n%R\t30043\t10031\t204\t150000\t96\t\t\t\t\t96\n%R\t30044\t10032\t201\t800000\t200\t\t\t\t\t200\n%R\t30045\t10032\t204\t600000\t200\t\t\t\t\t200\n%R\t30046\t10033\t203\t600000\t80\t\t\t\t\t80\n%R\t30047\t10033\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30048\t10034\t202\t1800000\t240\t\t\t\t\t240\n%R\t30049\t10035\t203\t500000\t144\t\t\t\t\t144\n%R\t30050\t10035\t201\t400000\t144\t\t\t\t\t144\n%R\t30051\t10036\t201\t400000\t80\t\t\t\t\t80\n%R\t30052\t10037\t206\t2500000\t280\t\t\t\t\t280\n%R\t30053\t10038\t202\t700000\t80\t\t\t\t\t80\n%R\t30054\t10039\t207\t500000\t120\t\t\t\t\t120\n%R\t30055\t10040\t202\t300000\t40\t\t\t\t\t40\n%R\t30056\t10041\t207\t400000\t96\t\t\t\t\t96\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10023\tS33-010\tSurvey & Set-out KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-01-26 07:00\t2026-02-01 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10024\tS33-020\tROW Clearing & Grading KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-02 07:00\t2026-02-17 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10025\tS33-030\tTrench Excavation KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-18 07:00\t2026-03-29 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10026\tS33-040\tPipe Stringing KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-25 07:00\t2026-03-10 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10027\tS33-050\tWelding & NDT KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-03-11 07:00\t2026-04-26 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10028\tS33-060\tLower-in & Backfill KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-04-27 07:00\t2026-05-20 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10029\tS33-070\tReinstatement KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-05-21 07:00\t2026-06-03 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10030\tS34-010\tSurvey & Set-out KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-03-26 07:00\t2026-04-01 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10031\tS34-020\tROW Clearing & Grading KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-02 07:00\t2026-04-19 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10032\tS34-030\tTrench Excavation KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-20 07:00\t2026-05-24 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10033\tS34-040\tPipe Stringing KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-27 07:00\t2026-05-10 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10034\tS34-050\tWelding & NDT KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-21 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10035\tS34-060\tLower-in & Backfill KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-06-22 07:00\t2026-07-15 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10036\tS34-070\tReinstatement KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-07-16 07:00\t2026-07-29 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10037\tC-010\tWadi Hanifa HDD Crossing KP529+800\t5040\t1001\tTT_Task\tTK_NotStart\t2026-03-09 07:00\t2026-04-29 15:00\t\t\t80\t280\t\t\t\t100\n%R\t10038\tC-020\tPump Station 2 Tie-in KP536+000\t5040\t1001\tTT_Task\tTK_NotStart\t2026-07-23 07:00\t2026-08-05 15:00\t\t\t40\t80\t\tCS_MEO\t2026-07-29 15:00\t100\n%R\t10039\tT-010\tHydrostatic Test — Section 2 Mainline\t5050\t1001\tTT_Task\tTK_NotStart\t2026-06-25 07:00\t2026-07-15 15:00\t\t\t0\t120\t\t\t\t100\n%R\t10040\tT-020\tGolden Weld Tie-in KP518+400\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-19 07:00\t2026-07-23 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10041\tT-030\tPre-commissioning & Dewatering\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-19 07:00\t2026-08-03 15:00\t\t\t0\t96\t\t\t\t100\n%R\t10042\tM-100\tSection 2 Mechanical Completion\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-08-04 07:00\t2026-08-04 07:00\t\t\t0\t0\t\tCS_MANDFIN\t2026-09-01 15:00\t100\n%R\t10043\tM-110\tHandover to Operations\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-08-04 07:00\t2026-08-04 07:00\t\t\t0\t0\t\t\t\t100\n%E\n";
+const DEMO_XER = "ERMHDR\t19.12\t2026-07-01\tProject\tadmin\tPRISM demo export\tdbxDatabaseNoName\tProject Management\tSAR\n%T\tCALENDAR\n%F\tclndr_id\tclndr_name\tday_hr_cnt\tclndr_data\n%R\t100\tNAJD Site — Sun-Thu 8h (KSA)\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|07:00|f|15:00)())))(0||2()((0||0(s|07:00|f|15:00)())))(0||3()((0||0(s|07:00|f|15:00)())))(0||4()((0||0(s|07:00|f|15:00)())))(0||5()((0||0(s|07:00|f|15:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()((0||0(d|45923)())(0||1(d|46100)())(0||2(d|46103)())(0||3(d|46104)())(0||4(d|46099)((0||0(s|07:00|f|11:00)())))))))\n%R\t101\tNAJD Office — Sun-Thu 8h\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|08:00|f|16:00)())))(0||2()((0||0(s|08:00|f|16:00)())))(0||3()((0||0(s|08:00|f|16:00)())))(0||4()((0||0(s|08:00|f|16:00)())))(0||5()((0||0(s|08:00|f|16:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()())))\n%T\tPROJECT\n%F\tproj_id\tproj_short_name\tplan_start_date\tplan_end_date\tlast_recalc_date\tlast_schedule_date\tclndr_id\n%R\t1001\tNAJD-S2\t2025-09-07 07:00\t2026-09-09 15:00\t2025-08-15 08:00\t2026-07-01 07:00\t100\n%T\tPROJWBS\n%F\twbs_id\tparent_wbs_id\twbs_short_name\twbs_name\tproj_node_flag\n%R\t5000\t\tNAJD-S2\tNAJD Water Transmission — Section 2\tY\n%R\t5010\t5000\tGEN\tGeneral & Milestones\tN\n%R\t5020\t5000\tPROC\tProcurement\tN\n%R\t5030\t5000\tPIPE\tPipeline Works\tN\n%R\t5031\t5030\tSEG-A\tSegment A — KP512+000 to KP518+000\tN\n%R\t5032\t5030\tSEG-B\tSegment B — KP518+000 to KP524+000\tN\n%R\t5033\t5030\tSEG-C\tSegment C — KP524+000 to KP530+000\tN\n%R\t5034\t5030\tSEG-D\tSegment D — KP530+000 to KP536+000\tN\n%R\t5040\t5000\tSTX\tStations & Crossings\tN\n%R\t5050\t5000\tTC\tTesting & Commissioning\tN\n%T\tACTVTYPE\n%F\tactv_code_type_id\tactv_code_type\tactv_code_type_scope\n%R\t401\tAREA\tAS_Project\n%R\t402\tPHASE\tAS_Project\n%T\tACTVCODE\n%F\tactv_code_id\tactv_code_type_id\tshort_name\tactv_code_name\tparent_actv_code_id\n%R\t501\t401\tN\tNorth Spread\t\n%R\t502\t401\tS\tSouth Spread\t\n%R\t503\t401\tX\tCrossings\t\n%R\t504\t401\tSW\tSite-wide\t\n%R\t511\t402\tEP\tEngineering & Procurement\t\n%R\t512\t402\tCON\tConstruction\t\n%R\t513\t402\tTST\tTesting & Handover\t\n%T\tRSRC\n%F\trsrc_id\trsrc_short_name\trsrc_name\trsrc_type\n%R\t201\tEW-CREW\tEarthworks Crew\tRT_Labor\n%R\t202\tWELD-CREW\tWelding & NDT Crew\tRT_Labor\n%R\t203\tSIDEBOOM\tSideboom Spread\tRT_Equip\n%R\t204\tEXCAV\t30t Excavator Fleet\tRT_Equip\n%R\t205\tPIPE-48\tPipe 48in CS API 5L\tRT_Mat\n%R\t206\tHDD-RIG\tHDD Maxi Rig\tRT_Equip\n%R\t207\tQAQC\tQA/QC Engineers\tRT_Labor\n%T\tRSRCRATE\n%F\trsrc_rate_id\trsrc_id\tmax_qty_per_hr\n%R\t301\t201\t2\n%R\t302\t202\t2\n%R\t303\t203\t1\n%R\t304\t206\t1\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10001\tA-000\tNotice to Proceed\t5010\t1001\tTT_Mile\tTK_Complete\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 07:00\t2025-09-07 15:00\t\t0\t100\t\t\t100\n%R\t10002\tA-010\tMobilization & Temporary Works\t5010\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2025-10-05 15:00\t2025-09-07 07:00\t2025-10-05 15:00\t\t0\t100\t\t\t100\n%R\t10003\tA-020\tSite Facilities & Access Roads\t5010\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-11-16 15:00\t2025-10-06 07:00\t2025-11-16 15:00\t\t0\t100\t\t\t100\n%R\t10004\tP-010\tPipe Mill Order & Manufacture\t5020\t1001\tTT_Task\tTK_Complete\t2025-09-07 07:00\t2026-02-08 15:00\t2025-09-07 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t101\n%R\t10005\tP-020\tPipe Delivery Lot 1 — Segments A and B\t5020\t1001\tTT_Task\tTK_Complete\t2026-01-12 07:00\t2026-02-01 15:00\t2026-01-12 07:00\t2026-02-01 15:00\t\t0\t100\t\t\t101\n%R\t10006\tP-030\tPipe Delivery Lot 2 — Segments C and D\t5020\t1001\tTT_Task\tTK_Active\t2026-05-07 07:00\t2026-05-27 15:00\t2026-06-18 07:00\t\t160\t48\t60\t\t\t101\n%R\t10007\tP-040\tValves & Fittings Procurement\t5020\t1001\tTT_Task\tTK_NotStart\t2026-06-18 07:00\t2026-07-15 15:00\t\t\t480\t160\t\t\t\t101\n%R\t10008\tS31-010\tSurvey & Set-out KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-06 07:00\t2025-10-12 15:00\t2025-10-06 07:00\t2025-10-12 15:00\t\t0\t100\t\t\t100\n%R\t10009\tS31-020\tROW Clearing & Grading KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-13 07:00\t2025-10-28 15:00\t2025-10-13 07:00\t2025-10-28 15:00\t\t0\t100\t\t\t100\n%R\t10010\tS31-030\tTrench Excavation KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-10-29 07:00\t2025-12-02 15:00\t2025-10-29 07:00\t2025-12-02 15:00\t\t0\t100\t\t\t100\n%R\t10011\tS31-040\tPipe Stringing KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-05 07:00\t2025-11-18 15:00\t2025-11-05 07:00\t2025-11-18 15:00\t\t0\t100\t\t\t100\n%R\t10012\tS31-050\tWelding & NDT KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-11-19 07:00\t2025-12-30 15:00\t2025-11-19 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10013\tS31-060\tLower-in & Backfill KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-01-25 15:00\t2025-12-31 07:00\t2026-01-25 15:00\t\t0\t100\t\t\t100\n%R\t10014\tS31-070\tReinstatement KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_Complete\t2026-01-26 07:00\t2026-02-08 15:00\t2026-01-26 07:00\t2026-02-08 15:00\t\t0\t100\t\t\t100\n%R\t10015\tS32-010\tSurvey & Set-out KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-08 07:00\t2025-12-14 15:00\t2025-12-08 07:00\t2025-12-14 15:00\t\t0\t100\t\t\t100\n%R\t10016\tS32-020\tROW Clearing & Grading KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-15 07:00\t2025-12-30 15:00\t2025-12-15 07:00\t2025-12-30 15:00\t\t0\t100\t\t\t100\n%R\t10017\tS32-030\tTrench Excavation KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2025-12-31 07:00\t2026-02-03 15:00\t2025-12-31 07:00\t2026-02-03 15:00\t\t0\t100\t\t\t100\n%R\t10018\tS32-040\tPipe Stringing KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-07 07:00\t2026-01-20 15:00\t2026-01-07 07:00\t2026-01-20 15:00\t\t0\t100\t\t\t100\n%R\t10019\tS32-050\tWelding & NDT KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-01-21 07:00\t2026-03-03 15:00\t2026-01-21 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10020\tS32-060\tLower-in & Backfill KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-01 15:00\t2026-03-04 07:00\t2026-04-01 15:00\t\t0\t100\t\t\t100\n%R\t10021\tS32-070\tReinstatement KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_Complete\t2026-04-02 07:00\t2026-04-15 15:00\t2026-04-02 07:00\t2026-04-15 15:00\t\t0\t100\t\t\t100\n%R\t10022\tS33-010\tSurvey & Set-out KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-09 07:00\t2026-02-15 15:00\t2026-02-09 07:00\t2026-02-15 15:00\t\t0\t100\t\t\t100\n%T\tTASKPRED\n%F\ttask_pred_id\ttask_id\tpred_task_id\tpred_type\tlag_hr_cnt\n%R\t20001\t10002\t10001\tPR_FS\t0\n%R\t20002\t10003\t10002\tPR_FS\t0\n%R\t20003\t10004\t10001\tPR_FS\t0\n%R\t20004\t10005\t10004\tPR_FF\t80\n%R\t20005\t10006\t10004\tPR_FS\t0\n%R\t20006\t10007\t10004\tPR_FS\t0\n%R\t20007\t10008\t10003\tPR_FS\t0\n%R\t20008\t10009\t10008\tPR_FS\t0\n%R\t20009\t10010\t10009\tPR_FS\t0\n%R\t20010\t10011\t10010\tPR_SS\t40\n%R\t20011\t10011\t10005\tPR_FS\t0\n%R\t20012\t10012\t10011\tPR_FS\t0\n%R\t20013\t10013\t10012\tPR_FS\t0\n%R\t20014\t10014\t10013\tPR_FS\t0\n%R\t20015\t10015\t10009\tPR_FS\t0\n%R\t20016\t10016\t10015\tPR_FS\t0\n%R\t20017\t10017\t10016\tPR_FS\t0\n%R\t20018\t10018\t10017\tPR_SS\t40\n%R\t20019\t10019\t10018\tPR_FS\t0\n%R\t20020\t10020\t10019\tPR_FS\t0\n%R\t20021\t10021\t10020\tPR_FS\t0\n%R\t20022\t10022\t10016\tPR_FS\t0\n%R\t20023\t10023\t10022\tPR_FS\t0\n%R\t20024\t10024\t10023\tPR_FS\t0\n%R\t20025\t10025\t10024\tPR_SS\t40\n%R\t20026\t10026\t10025\tPR_FS\t0\n%R\t20027\t10027\t10026\tPR_FS\t0\n%R\t20028\t10028\t10027\tPR_FS\t0\n%R\t20029\t10029\t10023\tPR_FS\t0\n%R\t20030\t10030\t10029\tPR_FS\t0\n%R\t20031\t10031\t10030\tPR_FS\t0\n%R\t20032\t10032\t10031\tPR_SS\t40\n%R\t20033\t10032\t10006\tPR_FS\t0\n%R\t20034\t10033\t10032\tPR_FS\t0\n%R\t20035\t10034\t10033\tPR_FS\t0\n%R\t20036\t10035\t10034\tPR_FS\t0\n%R\t20037\t10036\t10024\tPR_FS\t-40\n%R\t20038\t10037\t10035\tPR_FS\t0\n%R\t20039\t10039\t10034\tPR_FS\t0\n%R\t20040\t10039\t10028\tPR_FS\t0\n%R\t20041\t10039\t10014\tPR_FS\t0\n%R\t20042\t10039\t10021\tPR_FS\t0\n%R\t20043\t10039\t10036\tPR_FS\t0\n%R\t20044\t10039\t10007\tPR_FS\t0\n%R\t20045\t10040\t10026\tPR_FS\t0\n%R\t20046\t10041\t10039\tPR_FS\t0\n%R\t20047\t10041\t10040\tPR_FS\t0\n%R\t20048\t10042\t10041\tPR_FS\t0\n%R\t20049\t10042\t10038\tPR_FS\t0\n%R\t20050\t10043\t10042\tPR_FS\t80\n%T\tTASKRSRC\n%F\ttaskrsrc_id\ttask_id\trsrc_id\ttarget_cost\ttarget_qty\tact_reg_cost\tact_ot_cost\tact_reg_qty\tact_ot_qty\tremain_qty\n%R\t30001\t10002\t201\t1500000\t160\t1551000\t99000\t160\t\t0\n%R\t30002\t10003\t204\t1200000\t240\t1184400\t75600\t240\t\t0\n%R\t30003\t10004\t205\t2000000\t0\t1917600\t122400\t\t\t0\n%R\t30004\t10005\t205\t800000\t0\t752000\t48000\t\t\t0\n%R\t30005\t10006\t205\t800000\t0\t466240\t29760\t\t\t0\n%R\t30006\t10007\t207\t600000\t0\t\t\t\t\t0\n%R\t30007\t10008\t207\t120000\t40\t121824\t7776\t40\t\t0\n%R\t30008\t10009\t201\t300000\t96\t304560\t19440\t96\t\t0\n%R\t30009\t10009\t204\t150000\t96\t152280\t9720\t96\t\t0\n%R\t30010\t10010\t201\t800000\t200\t812160\t51840\t200\t\t0\n%R\t30011\t10010\t204\t600000\t200\t609120\t38880\t200\t\t0\n%R\t30012\t10011\t203\t600000\t80\t609120\t38880\t80\t\t0\n%R\t30013\t10011\t205\t3200000\t6000\t3248640\t207360\t6000\t\t0\n%R\t30014\t10012\t202\t1800000\t240\t1827360\t116640\t240\t\t0\n%R\t30015\t10013\t203\t500000\t144\t507600\t32400\t144\t\t0\n%R\t30016\t10013\t201\t400000\t144\t406080\t25920\t144\t\t0\n%R\t30017\t10014\t201\t400000\t80\t406080\t25920\t80\t\t0\n%R\t30018\t10015\t207\t120000\t40\t126336\t8064\t40\t\t0\n%R\t30019\t10016\t201\t300000\t96\t315840\t20160\t96\t\t0\n%R\t30020\t10016\t204\t150000\t96\t157920\t10080\t96\t\t0\n%R\t30021\t10017\t201\t800000\t200\t842240\t53760\t200\t\t0\n%R\t30022\t10017\t204\t600000\t200\t631680\t40320\t200\t\t0\n%R\t30023\t10018\t203\t600000\t80\t631680\t40320\t80\t\t0\n%R\t30024\t10018\t205\t3200000\t6000\t3368960\t215040\t6000\t\t0\n%R\t30025\t10019\t202\t1800000\t240\t1895040\t120960\t240\t\t0\n%R\t30026\t10020\t203\t500000\t144\t526400\t33600\t144\t\t0\n%R\t30027\t10020\t201\t400000\t144\t421120\t26880\t144\t\t0\n%R\t30028\t10021\t201\t400000\t80\t421120\t26880\t80\t\t0\n%R\t30029\t10022\t207\t120000\t40\t122952\t7848\t40\t\t0\n%R\t30030\t10023\t201\t300000\t96\t307380\t19620\t96\t\t0\n%R\t30031\t10023\t204\t150000\t96\t153690\t9810\t96\t\t0\n%R\t30032\t10024\t201\t800000\t200\t819680\t52320\t200\t\t0\n%R\t30033\t10024\t204\t600000\t200\t614760\t39240\t200\t\t0\n%R\t30034\t10025\t203\t600000\t80\t614760\t39240\t80\t\t0\n%R\t30035\t10025\t205\t3200000\t6000\t3278720\t209280\t6000\t\t0\n%R\t30036\t10026\t202\t1800000\t240\t963636\t61509\t137\t\t103\n%R\t30037\t10027\t203\t500000\t144\t\t\t\t\t144\n%R\t30038\t10027\t201\t400000\t144\t\t\t\t\t144\n%R\t30039\t10028\t201\t400000\t80\t\t\t\t\t80\n%R\t30040\t10029\t207\t120000\t40\t119568\t7632\t40\t\t0\n%R\t30041\t10030\t201\t300000\t96\t85192\t5438\t29\t\t67\n%R\t30042\t10030\t204\t150000\t96\t42596\t2719\t29\t\t67\n%R\t30043\t10031\t201\t800000\t200\t\t\t\t\t200\n%R\t30044\t10031\t204\t600000\t200\t\t\t\t\t200\n%R\t30045\t10032\t203\t600000\t80\t\t\t\t\t80\n%R\t30046\t10032\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30047\t10033\t202\t1800000\t368\t\t\t\t\t368\n%R\t30048\t10034\t203\t500000\t144\t\t\t\t\t144\n%R\t30049\t10034\t201\t400000\t144\t\t\t\t\t144\n%R\t30050\t10035\t201\t400000\t80\t\t\t\t\t80\n%R\t30051\t10036\t206\t2500000\t280\t1292500\t82500\t154\t\t126\n%R\t30052\t10037\t202\t700000\t80\t\t\t\t\t80\n%R\t30053\t10038\t207\t900000\t200\t\t\t\t\t200\n%R\t30054\t10039\t207\t500000\t120\t\t\t\t\t120\n%R\t30055\t10040\t202\t300000\t40\t\t\t\t\t40\n%R\t30056\t10041\t207\t400000\t96\t\t\t\t\t96\n%T\tTASKACTV\n%F\ttask_id\tactv_code_type_id\tactv_code_id\tproj_id\n%R\t10001\t401\t504\t1001\n%R\t10001\t402\t512\t1001\n%R\t10002\t401\t504\t1001\n%R\t10002\t402\t512\t1001\n%R\t10003\t401\t504\t1001\n%R\t10003\t402\t512\t1001\n%R\t10004\t401\t504\t1001\n%R\t10004\t402\t511\t1001\n%R\t10005\t401\t504\t1001\n%R\t10005\t402\t511\t1001\n%R\t10006\t401\t504\t1001\n%R\t10006\t402\t511\t1001\n%R\t10007\t401\t504\t1001\n%R\t10007\t402\t511\t1001\n%R\t10008\t401\t501\t1001\n%R\t10008\t402\t512\t1001\n%R\t10009\t401\t501\t1001\n%R\t10009\t402\t512\t1001\n%R\t10010\t401\t501\t1001\n%R\t10010\t402\t512\t1001\n%R\t10011\t401\t501\t1001\n%R\t10011\t402\t512\t1001\n%R\t10012\t401\t501\t1001\n%R\t10012\t402\t512\t1001\n%R\t10013\t401\t501\t1001\n%R\t10013\t402\t512\t1001\n%R\t10014\t401\t501\t1001\n%R\t10014\t402\t512\t1001\n%R\t10015\t401\t501\t1001\n%R\t10015\t402\t512\t1001\n%R\t10016\t401\t501\t1001\n%R\t10016\t402\t512\t1001\n%R\t10017\t401\t501\t1001\n%R\t10017\t402\t512\t1001\n%R\t10018\t401\t501\t1001\n%R\t10018\t402\t512\t1001\n%R\t10019\t401\t501\t1001\n%R\t10019\t402\t512\t1001\n%R\t10020\t401\t501\t1001\n%R\t10020\t402\t512\t1001\n%R\t10021\t401\t501\t1001\n%R\t10021\t402\t512\t1001\n%R\t10022\t401\t502\t1001\n%R\t10022\t402\t512\t1001\n%R\t10023\t401\t502\t1001\n%R\t10023\t402\t512\t1001\n%R\t10024\t401\t502\t1001\n%R\t10024\t402\t512\t1001\n%R\t10025\t401\t502\t1001\n%R\t10025\t402\t512\t1001\n%R\t10026\t401\t502\t1001\n%R\t10026\t402\t512\t1001\n%R\t10027\t401\t502\t1001\n%R\t10027\t402\t512\t1001\n%R\t10028\t401\t502\t1001\n%R\t10028\t402\t512\t1001\n%R\t10029\t401\t502\t1001\n%R\t10029\t402\t512\t1001\n%R\t10030\t401\t502\t1001\n%R\t10030\t402\t512\t1001\n%R\t10031\t401\t502\t1001\n%R\t10031\t402\t512\t1001\n%R\t10032\t401\t502\t1001\n%R\t10032\t402\t512\t1001\n%R\t10033\t401\t502\t1001\n%R\t10033\t402\t512\t1001\n%R\t10034\t401\t502\t1001\n%R\t10034\t402\t512\t1001\n%R\t10035\t401\t502\t1001\n%R\t10035\t402\t512\t1001\n%R\t10036\t401\t503\t1001\n%R\t10036\t402\t512\t1001\n%R\t10037\t401\t503\t1001\n%R\t10037\t402\t512\t1001\n%R\t10038\t401\t503\t1001\n%R\t10038\t402\t512\t1001\n%R\t10039\t401\t504\t1001\n%R\t10039\t402\t513\t1001\n%R\t10040\t401\t504\t1001\n%R\t10040\t402\t513\t1001\n%R\t10041\t401\t504\t1001\n%R\t10041\t402\t513\t1001\n%R\t10042\t401\t504\t1001\n%R\t10042\t402\t513\t1001\n%R\t10043\t401\t504\t1001\n%R\t10043\t402\t513\t1001\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10023\tS33-020\tROW Clearing & Grading KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-02-16 07:00\t2026-03-03 15:00\t2026-02-16 07:00\t2026-03-03 15:00\t\t0\t100\t\t\t100\n%R\t10024\tS33-030\tTrench Excavation KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-04 07:00\t2026-04-12 15:00\t2026-03-04 07:00\t2026-04-12 15:00\t\t0\t100\t\t\t100\n%R\t10025\tS33-040\tPipe Stringing KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Complete\t2026-03-11 07:00\t2026-03-29 15:00\t2026-03-11 07:00\t2026-03-29 15:00\t\t0\t100\t\t\t100\n%R\t10026\tS33-050\tWelding & NDT KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_Active\t2026-03-30 07:00\t2026-05-10 15:00\t2026-04-09 07:00\t\t0\t120\t55\t\t\t100\n%R\t10027\tS33-060\tLower-in & Backfill KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-03 15:00\t\t\t0\t144\t\t\t\t100\n%R\t10028\tS33-070\tReinstatement KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-06-04 07:00\t2026-06-17 15:00\t\t\t40\t80\t\t\t\t100\n%R\t10029\tS34-010\tSurvey & Set-out KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Complete\t2026-04-16 07:00\t2026-04-22 15:00\t2026-04-16 07:00\t2026-04-22 15:00\t\t0\t100\t\t\t100\n%R\t10030\tS34-020\tROW Clearing & Grading KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_Active\t2026-04-23 07:00\t2026-05-10 15:00\t2026-05-07 07:00\t\t-40\t80\t30\t\t\t100\n%R\t10031\tS34-030\tTrench Excavation KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-14 15:00\t\t\t-40\t200\t\t\t\t100\n%R\t10032\tS34-040\tPipe Stringing KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-18 07:00\t2026-05-31 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10033\tS34-050\tWelding & NDT KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-06-01 07:00\t2026-08-03 15:00\t\t\t-40\t368\t\t\t\t100\n%R\t10034\tS34-060\tLower-in & Backfill KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-07-13 07:00\t2026-08-05 15:00\t\t\t-40\t144\t\t\t\t100\n%R\t10035\tS34-070\tReinstatement KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-08-19 15:00\t\t\t-40\t80\t\t\t\t100\n%R\t10036\tC-010\tWadi Hanifa HDD Crossing KP529+800\t5040\t1001\tTT_Task\tTK_Active\t2026-03-26 07:00\t2026-05-13 15:00\t2026-03-26 07:00\t\t24\t160\t45\t\t\t100\n%R\t10037\tC-020\tPump Station 2 Tie-in KP536+000\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-27 07:00\t2026-09-09 15:00\t\t\t40\t80\t\tCS_MEO\t2026-09-02 15:00\t100\n%R\t10038\tC-030\tCathodic Protection System — Section 2 Mainline\t5040\t1001\tTT_Task\tTK_NotStart\t2026-08-06 07:00\t2026-09-09 15:00\t\t\t120\t200\t\t\t\t100\n%R\t10039\tT-010\tHydrostatic Test — Section 2 Mainline\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-30 07:00\t2026-08-19 15:00\t\t\t-40\t120\t\t\t\t100\n%R\t10040\tT-020\tGolden Weld Tie-in KP518+400\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-08-27 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10041\tT-030\tPre-commissioning & Dewatering\t5050\t1001\tTT_Task\tTK_NotStart\t2026-08-23 07:00\t2026-09-07 15:00\t\t\t-40\t96\t\t\t\t100\n%R\t10042\tM-100\tSection 2 Mechanical Completion\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\tCS_MANDFIN\t2026-09-01 15:00\t100\n%R\t10043\tM-110\tHandover to Operations\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-09-08 07:00\t2026-09-08 07:00\t\t\t-40\t0\t\t\t\t100\n%E\n";
+const BASELINE_XER = "ERMHDR\t19.12\t2025-08-15\tProject\tadmin\tPRISM demo export\tdbxDatabaseNoName\tProject Management\tSAR\n%T\tCALENDAR\n%F\tclndr_id\tclndr_name\tday_hr_cnt\tclndr_data\n%R\t100\tNAJD Site — Sun-Thu 8h (KSA)\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|07:00|f|15:00)())))(0||2()((0||0(s|07:00|f|15:00)())))(0||3()((0||0(s|07:00|f|15:00)())))(0||4()((0||0(s|07:00|f|15:00)())))(0||5()((0||0(s|07:00|f|15:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()((0||0(d|45923)())(0||1(d|46100)())(0||2(d|46103)())(0||3(d|46104)())(0||4(d|46099)((0||0(s|07:00|f|11:00)())))))))\n%R\t101\tNAJD Office — Sun-Thu 8h\t8\t(0||CalendarData()((0||DaysOfWeek()((0||1()((0||0(s|08:00|f|16:00)())))(0||2()((0||0(s|08:00|f|16:00)())))(0||3()((0||0(s|08:00|f|16:00)())))(0||4()((0||0(s|08:00|f|16:00)())))(0||5()((0||0(s|08:00|f|16:00)())))(0||6()())(0||7()())))(0||VIEW(ShowTotal|N)())(0||Exceptions()())))\n%T\tPROJECT\n%F\tproj_id\tproj_short_name\tplan_start_date\tplan_end_date\tlast_recalc_date\tlast_schedule_date\tclndr_id\n%R\t1001\tNAJD-S2\t2025-09-07 07:00\t2026-08-05 15:00\t2025-08-15 08:00\t\t100\n%T\tPROJWBS\n%F\twbs_id\tparent_wbs_id\twbs_short_name\twbs_name\tproj_node_flag\n%R\t5000\t\tNAJD-S2\tNAJD Water Transmission — Section 2\tY\n%R\t5010\t5000\tGEN\tGeneral & Milestones\tN\n%R\t5020\t5000\tPROC\tProcurement\tN\n%R\t5030\t5000\tPIPE\tPipeline Works\tN\n%R\t5031\t5030\tSEG-A\tSegment A — KP512+000 to KP518+000\tN\n%R\t5032\t5030\tSEG-B\tSegment B — KP518+000 to KP524+000\tN\n%R\t5033\t5030\tSEG-C\tSegment C — KP524+000 to KP530+000\tN\n%R\t5034\t5030\tSEG-D\tSegment D — KP530+000 to KP536+000\tN\n%R\t5040\t5000\tSTX\tStations & Crossings\tN\n%R\t5050\t5000\tTC\tTesting & Commissioning\tN\n%T\tACTVTYPE\n%F\tactv_code_type_id\tactv_code_type\tactv_code_type_scope\n%R\t401\tAREA\tAS_Project\n%R\t402\tPHASE\tAS_Project\n%T\tACTVCODE\n%F\tactv_code_id\tactv_code_type_id\tshort_name\tactv_code_name\tparent_actv_code_id\n%R\t501\t401\tN\tNorth Spread\t\n%R\t502\t401\tS\tSouth Spread\t\n%R\t503\t401\tX\tCrossings\t\n%R\t504\t401\tSW\tSite-wide\t\n%R\t511\t402\tEP\tEngineering & Procurement\t\n%R\t512\t402\tCON\tConstruction\t\n%R\t513\t402\tTST\tTesting & Handover\t\n%T\tRSRC\n%F\trsrc_id\trsrc_short_name\trsrc_name\trsrc_type\n%R\t201\tEW-CREW\tEarthworks Crew\tRT_Labor\n%R\t202\tWELD-CREW\tWelding & NDT Crew\tRT_Labor\n%R\t203\tSIDEBOOM\tSideboom Spread\tRT_Equip\n%R\t204\tEXCAV\t30t Excavator Fleet\tRT_Equip\n%R\t205\tPIPE-48\tPipe 48in CS API 5L\tRT_Mat\n%R\t206\tHDD-RIG\tHDD Maxi Rig\tRT_Equip\n%R\t207\tQAQC\tQA/QC Engineers\tRT_Labor\n%T\tRSRCRATE\n%F\trsrc_rate_id\trsrc_id\tmax_qty_per_hr\n%R\t301\t201\t2\n%R\t302\t202\t2\n%R\t303\t203\t1\n%R\t304\t206\t1\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10001\tA-000\tNotice to Proceed\t5010\t1001\tTT_Mile\tTK_NotStart\t2025-09-07 07:00\t2025-09-07 07:00\t\t\t80\t0\t\t\t\t100\n%R\t10002\tA-010\tMobilization & Temporary Works\t5010\t1001\tTT_Task\tTK_NotStart\t2025-09-07 07:00\t2025-10-05 15:00\t\t\t80\t160\t\t\t\t100\n%R\t10003\tA-020\tSite Facilities & Access Roads\t5010\t1001\tTT_Task\tTK_NotStart\t2025-10-06 07:00\t2025-11-16 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10004\tP-010\tPipe Mill Order & Manufacture\t5020\t1001\tTT_Task\tTK_NotStart\t2025-09-07 07:00\t2026-02-08 15:00\t\t\t80\t880\t\t\t\t101\n%R\t10005\tP-020\tPipe Delivery Lot 1 — Segments A and B\t5020\t1001\tTT_Task\tTK_NotStart\t2026-01-12 07:00\t2026-02-01 15:00\t\t\t80\t120\t\t\t\t101\n%R\t10006\tP-030\tPipe Delivery Lot 2 — Segments C and D\t5020\t1001\tTT_Task\tTK_NotStart\t2026-04-09 07:00\t2026-04-29 15:00\t\t\t80\t120\t\t\t\t101\n%R\t10007\tP-040\tValves & Fittings Procurement\t5020\t1001\tTT_Task\tTK_NotStart\t2026-05-21 07:00\t2026-06-17 15:00\t\t\t480\t160\t\t\t\t101\n%R\t10008\tS31-010\tSurvey & Set-out KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-06 07:00\t2025-10-12 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10009\tS31-020\tROW Clearing & Grading KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-13 07:00\t2025-10-28 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10010\tS31-030\tTrench Excavation KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-29 07:00\t2025-12-02 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10011\tS31-040\tPipe Stringing KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-11-05 07:00\t2025-11-18 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10012\tS31-050\tWelding & NDT KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-11-19 07:00\t2025-12-30 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10013\tS31-060\tLower-in & Backfill KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-12-31 07:00\t2026-01-25 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10014\tS31-070\tReinstatement KP512+000 to KP518+000\t5031\t1001\tTT_Task\tTK_NotStart\t2026-01-26 07:00\t2026-02-08 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10015\tS31-025\tDewatering Trial KP513+000\t5031\t1001\tTT_Task\tTK_NotStart\t2025-10-20 07:00\t2025-10-29 15:00\t\t\t80\t64\t\t\t\t100\n%R\t10016\tS32-010\tSurvey & Set-out KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-01 07:00\t2025-12-07 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10017\tS32-020\tROW Clearing & Grading KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-08 07:00\t2025-12-23 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10018\tS32-030\tTrench Excavation KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-24 07:00\t2026-01-27 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10019\tS32-040\tPipe Stringing KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2025-12-31 07:00\t2026-01-13 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10020\tS32-050\tWelding & NDT KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-01-14 07:00\t2026-02-24 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10021\tS32-060\tLower-in & Backfill KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-02-25 07:00\t2026-03-25 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10022\tS32-070\tReinstatement KP518+000 to KP524+000\t5032\t1001\tTT_Task\tTK_NotStart\t2026-03-26 07:00\t2026-04-08 15:00\t\t\t80\t80\t\t\t\t100\n%T\tTASKPRED\n%F\ttask_pred_id\ttask_id\tpred_task_id\tpred_type\tlag_hr_cnt\n%R\t20001\t10002\t10001\tPR_FS\t0\n%R\t20002\t10003\t10002\tPR_FS\t0\n%R\t20003\t10004\t10001\tPR_FS\t0\n%R\t20004\t10005\t10004\tPR_FF\t80\n%R\t20005\t10006\t10004\tPR_FS\t0\n%R\t20006\t10007\t10004\tPR_FS\t0\n%R\t20007\t10008\t10003\tPR_FS\t0\n%R\t20008\t10009\t10008\tPR_FS\t0\n%R\t20009\t10010\t10009\tPR_FS\t0\n%R\t20010\t10011\t10010\tPR_SS\t40\n%R\t20011\t10011\t10005\tPR_FS\t0\n%R\t20012\t10012\t10011\tPR_FS\t0\n%R\t20013\t10013\t10012\tPR_FS\t0\n%R\t20014\t10014\t10013\tPR_FS\t0\n%R\t20015\t10015\t10009\tPR_FS\t0\n%R\t20016\t10016\t10009\tPR_FS\t0\n%R\t20017\t10017\t10016\tPR_FS\t0\n%R\t20018\t10018\t10017\tPR_FS\t0\n%R\t20019\t10019\t10018\tPR_SS\t40\n%R\t20020\t10020\t10019\tPR_FS\t0\n%R\t20021\t10021\t10020\tPR_FS\t0\n%R\t20022\t10022\t10021\tPR_FS\t0\n%R\t20023\t10023\t10017\tPR_FS\t0\n%R\t20024\t10024\t10023\tPR_FS\t0\n%R\t20025\t10025\t10024\tPR_FS\t0\n%R\t20026\t10026\t10025\tPR_SS\t40\n%R\t20027\t10027\t10026\tPR_FS\t0\n%R\t20028\t10028\t10027\tPR_FS\t0\n%R\t20029\t10029\t10028\tPR_FS\t0\n%R\t20030\t10030\t10024\tPR_FS\t0\n%R\t20031\t10031\t10030\tPR_FS\t0\n%R\t20032\t10032\t10031\tPR_FS\t0\n%R\t20033\t10033\t10032\tPR_SS\t40\n%R\t20034\t10033\t10006\tPR_FS\t0\n%R\t20035\t10034\t10033\tPR_FS\t0\n%R\t20036\t10035\t10034\tPR_FS\t0\n%R\t20037\t10036\t10035\tPR_FS\t0\n%R\t20038\t10037\t10025\tPR_FS\t-40\n%R\t20039\t10038\t10036\tPR_FS\t0\n%R\t20040\t10039\t10035\tPR_FS\t0\n%R\t20041\t10039\t10029\tPR_FS\t0\n%R\t20042\t10039\t10014\tPR_FS\t0\n%R\t20043\t10039\t10022\tPR_FS\t0\n%R\t20044\t10039\t10037\tPR_FS\t0\n%R\t20045\t10039\t10007\tPR_FS\t0\n%R\t20046\t10040\t10027\tPR_FS\t0\n%R\t20047\t10041\t10039\tPR_FS\t0\n%R\t20048\t10041\t10040\tPR_FS\t0\n%R\t20049\t10042\t10041\tPR_FS\t0\n%R\t20050\t10043\t10042\tPR_FS\t80\n%T\tTASKRSRC\n%F\ttaskrsrc_id\ttask_id\trsrc_id\ttarget_cost\ttarget_qty\tact_reg_cost\tact_ot_cost\tact_reg_qty\tact_ot_qty\tremain_qty\n%R\t30001\t10002\t201\t1500000\t160\t\t\t\t\t160\n%R\t30002\t10003\t204\t1200000\t240\t\t\t\t\t240\n%R\t30003\t10004\t205\t2000000\t0\t\t\t\t\t0\n%R\t30004\t10005\t205\t800000\t0\t\t\t\t\t0\n%R\t30005\t10006\t205\t800000\t0\t\t\t\t\t0\n%R\t30006\t10007\t207\t600000\t0\t\t\t\t\t0\n%R\t30007\t10008\t207\t120000\t40\t\t\t\t\t40\n%R\t30008\t10009\t201\t300000\t96\t\t\t\t\t96\n%R\t30009\t10009\t204\t150000\t96\t\t\t\t\t96\n%R\t30010\t10010\t201\t800000\t200\t\t\t\t\t200\n%R\t30011\t10010\t204\t600000\t200\t\t\t\t\t200\n%R\t30012\t10011\t203\t600000\t80\t\t\t\t\t80\n%R\t30013\t10011\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30014\t10012\t202\t1800000\t240\t\t\t\t\t240\n%R\t30015\t10013\t203\t500000\t144\t\t\t\t\t144\n%R\t30016\t10013\t201\t400000\t144\t\t\t\t\t144\n%R\t30017\t10014\t201\t400000\t80\t\t\t\t\t80\n%R\t30018\t10015\t204\t250000\t64\t\t\t\t\t64\n%R\t30019\t10016\t207\t120000\t40\t\t\t\t\t40\n%R\t30020\t10017\t201\t300000\t96\t\t\t\t\t96\n%R\t30021\t10017\t204\t150000\t96\t\t\t\t\t96\n%R\t30022\t10018\t201\t800000\t200\t\t\t\t\t200\n%R\t30023\t10018\t204\t600000\t200\t\t\t\t\t200\n%R\t30024\t10019\t203\t600000\t80\t\t\t\t\t80\n%R\t30025\t10019\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30026\t10020\t202\t1800000\t240\t\t\t\t\t240\n%R\t30027\t10021\t203\t500000\t144\t\t\t\t\t144\n%R\t30028\t10021\t201\t400000\t144\t\t\t\t\t144\n%R\t30029\t10022\t201\t400000\t80\t\t\t\t\t80\n%R\t30030\t10023\t207\t120000\t40\t\t\t\t\t40\n%R\t30031\t10024\t201\t300000\t96\t\t\t\t\t96\n%R\t30032\t10024\t204\t150000\t96\t\t\t\t\t96\n%R\t30033\t10025\t201\t800000\t200\t\t\t\t\t200\n%R\t30034\t10025\t204\t600000\t200\t\t\t\t\t200\n%R\t30035\t10026\t203\t600000\t80\t\t\t\t\t80\n%R\t30036\t10026\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30037\t10027\t202\t1800000\t240\t\t\t\t\t240\n%R\t30038\t10028\t203\t500000\t144\t\t\t\t\t144\n%R\t30039\t10028\t201\t400000\t144\t\t\t\t\t144\n%R\t30040\t10029\t201\t400000\t80\t\t\t\t\t80\n%R\t30041\t10030\t207\t120000\t40\t\t\t\t\t40\n%R\t30042\t10031\t201\t300000\t96\t\t\t\t\t96\n%R\t30043\t10031\t204\t150000\t96\t\t\t\t\t96\n%R\t30044\t10032\t201\t800000\t200\t\t\t\t\t200\n%R\t30045\t10032\t204\t600000\t200\t\t\t\t\t200\n%R\t30046\t10033\t203\t600000\t80\t\t\t\t\t80\n%R\t30047\t10033\t205\t3200000\t6000\t\t\t\t\t6000\n%R\t30048\t10034\t202\t1800000\t240\t\t\t\t\t240\n%R\t30049\t10035\t203\t500000\t144\t\t\t\t\t144\n%R\t30050\t10035\t201\t400000\t144\t\t\t\t\t144\n%R\t30051\t10036\t201\t400000\t80\t\t\t\t\t80\n%R\t30052\t10037\t206\t2500000\t280\t\t\t\t\t280\n%R\t30053\t10038\t202\t700000\t80\t\t\t\t\t80\n%R\t30054\t10039\t207\t500000\t120\t\t\t\t\t120\n%R\t30055\t10040\t202\t300000\t40\t\t\t\t\t40\n%R\t30056\t10041\t207\t400000\t96\t\t\t\t\t96\n%T\tTASKACTV\n%F\ttask_id\tactv_code_type_id\tactv_code_id\tproj_id\n%R\t10001\t401\t504\t1001\n%R\t10001\t402\t512\t1001\n%R\t10002\t401\t504\t1001\n%R\t10002\t402\t512\t1001\n%R\t10003\t401\t504\t1001\n%R\t10003\t402\t512\t1001\n%R\t10004\t401\t504\t1001\n%R\t10004\t402\t511\t1001\n%R\t10005\t401\t504\t1001\n%R\t10005\t402\t511\t1001\n%R\t10006\t401\t504\t1001\n%R\t10006\t402\t511\t1001\n%R\t10007\t401\t504\t1001\n%R\t10007\t402\t511\t1001\n%R\t10008\t401\t501\t1001\n%R\t10008\t402\t512\t1001\n%R\t10009\t401\t501\t1001\n%R\t10009\t402\t512\t1001\n%R\t10010\t401\t501\t1001\n%R\t10010\t402\t512\t1001\n%R\t10011\t401\t501\t1001\n%R\t10011\t402\t512\t1001\n%R\t10012\t401\t501\t1001\n%R\t10012\t402\t512\t1001\n%R\t10013\t401\t501\t1001\n%R\t10013\t402\t512\t1001\n%R\t10014\t401\t501\t1001\n%R\t10014\t402\t512\t1001\n%R\t10015\t401\t501\t1001\n%R\t10015\t402\t512\t1001\n%R\t10016\t401\t501\t1001\n%R\t10016\t402\t512\t1001\n%R\t10017\t401\t501\t1001\n%R\t10017\t402\t512\t1001\n%R\t10018\t401\t501\t1001\n%R\t10018\t402\t512\t1001\n%R\t10019\t401\t501\t1001\n%R\t10019\t402\t512\t1001\n%R\t10020\t401\t501\t1001\n%R\t10020\t402\t512\t1001\n%R\t10021\t401\t501\t1001\n%R\t10021\t402\t512\t1001\n%R\t10022\t401\t501\t1001\n%R\t10022\t402\t512\t1001\n%R\t10023\t401\t502\t1001\n%R\t10023\t402\t512\t1001\n%R\t10024\t401\t502\t1001\n%R\t10024\t402\t512\t1001\n%R\t10025\t401\t502\t1001\n%R\t10025\t402\t512\t1001\n%R\t10026\t401\t502\t1001\n%R\t10026\t402\t512\t1001\n%R\t10027\t401\t502\t1001\n%R\t10027\t402\t512\t1001\n%R\t10028\t401\t502\t1001\n%R\t10028\t402\t512\t1001\n%R\t10029\t401\t502\t1001\n%R\t10029\t402\t512\t1001\n%R\t10030\t401\t502\t1001\n%R\t10030\t402\t512\t1001\n%R\t10031\t401\t502\t1001\n%R\t10031\t402\t512\t1001\n%R\t10032\t401\t502\t1001\n%R\t10032\t402\t512\t1001\n%R\t10033\t401\t502\t1001\n%R\t10033\t402\t512\t1001\n%R\t10034\t401\t502\t1001\n%R\t10034\t402\t512\t1001\n%R\t10035\t401\t502\t1001\n%R\t10035\t402\t512\t1001\n%R\t10036\t401\t502\t1001\n%R\t10036\t402\t512\t1001\n%R\t10037\t401\t503\t1001\n%R\t10037\t402\t512\t1001\n%R\t10038\t401\t503\t1001\n%R\t10038\t402\t512\t1001\n%R\t10039\t401\t504\t1001\n%R\t10039\t402\t513\t1001\n%R\t10040\t401\t504\t1001\n%R\t10040\t402\t513\t1001\n%R\t10041\t401\t504\t1001\n%R\t10041\t402\t513\t1001\n%R\t10042\t401\t504\t1001\n%R\t10042\t402\t513\t1001\n%R\t10043\t401\t504\t1001\n%R\t10043\t402\t513\t1001\n%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\twbs_id\tproj_id\ttask_type\tstatus_code\ttarget_start_date\ttarget_end_date\tact_start_date\tact_end_date\ttotal_float_hr_cnt\tremain_drtn_hr_cnt\tphys_complete_pct\tcstr_type\tcstr_date\tclndr_id\n%R\t10023\tS33-010\tSurvey & Set-out KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-01-26 07:00\t2026-02-01 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10024\tS33-020\tROW Clearing & Grading KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-02 07:00\t2026-02-17 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10025\tS33-030\tTrench Excavation KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-18 07:00\t2026-03-29 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10026\tS33-040\tPipe Stringing KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-02-25 07:00\t2026-03-10 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10027\tS33-050\tWelding & NDT KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-03-11 07:00\t2026-04-26 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10028\tS33-060\tLower-in & Backfill KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-04-27 07:00\t2026-05-20 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10029\tS33-070\tReinstatement KP524+000 to KP530+000\t5033\t1001\tTT_Task\tTK_NotStart\t2026-05-21 07:00\t2026-06-03 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10030\tS34-010\tSurvey & Set-out KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-03-26 07:00\t2026-04-01 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10031\tS34-020\tROW Clearing & Grading KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-02 07:00\t2026-04-19 15:00\t\t\t80\t96\t\t\t\t100\n%R\t10032\tS34-030\tTrench Excavation KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-20 07:00\t2026-05-24 15:00\t\t\t80\t200\t\t\t\t100\n%R\t10033\tS34-040\tPipe Stringing KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-04-27 07:00\t2026-05-10 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10034\tS34-050\tWelding & NDT KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-05-11 07:00\t2026-06-21 15:00\t\t\t80\t240\t\t\t\t100\n%R\t10035\tS34-060\tLower-in & Backfill KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-06-22 07:00\t2026-07-15 15:00\t\t\t80\t144\t\t\t\t100\n%R\t10036\tS34-070\tReinstatement KP530+000 to KP536+000\t5034\t1001\tTT_Task\tTK_NotStart\t2026-07-16 07:00\t2026-07-29 15:00\t\t\t80\t80\t\t\t\t100\n%R\t10037\tC-010\tWadi Hanifa HDD Crossing KP529+800\t5040\t1001\tTT_Task\tTK_NotStart\t2026-03-09 07:00\t2026-04-29 15:00\t\t\t80\t280\t\t\t\t100\n%R\t10038\tC-020\tPump Station 2 Tie-in KP536+000\t5040\t1001\tTT_Task\tTK_NotStart\t2026-07-23 07:00\t2026-08-05 15:00\t\t\t40\t80\t\tCS_MEO\t2026-07-29 15:00\t100\n%R\t10039\tT-010\tHydrostatic Test — Section 2 Mainline\t5050\t1001\tTT_Task\tTK_NotStart\t2026-06-25 07:00\t2026-07-15 15:00\t\t\t0\t120\t\t\t\t100\n%R\t10040\tT-020\tGolden Weld Tie-in KP518+400\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-19 07:00\t2026-07-23 15:00\t\t\t80\t40\t\t\t\t100\n%R\t10041\tT-030\tPre-commissioning & Dewatering\t5050\t1001\tTT_Task\tTK_NotStart\t2026-07-19 07:00\t2026-08-03 15:00\t\t\t0\t96\t\t\t\t100\n%R\t10042\tM-100\tSection 2 Mechanical Completion\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-08-04 07:00\t2026-08-04 07:00\t\t\t0\t0\t\tCS_MANDFIN\t2026-09-01 15:00\t100\n%R\t10043\tM-110\tHandover to Operations\t5010\t1001\tTT_FinMile\tTK_NotStart\t2026-08-04 07:00\t2026-08-04 07:00\t\t\t0\t0\t\t\t\t100\n%E\n";
 
 
 // ---- src/ui/modal.js ----
@@ -2319,8 +2425,12 @@ const ViewCommand = {
               ${statTile({ id: 'cpi', label: 'CPI', value: valueOrNA(fmtRatio(evm.cpi.value), evm.cpi.reason), tone: cpiTone, note: 'EV ÷ AC' })}
             </div>
             <div class="statrow">
+              ${statTile({ id: 'spit', label: 'SPI(t)', value: valueOrNA(fmtRatio(evm.es.value), evm.es.reason), tone: evm.es.value === null ? '' : evm.es.value >= 0.95 ? 'good' : evm.es.value >= 0.85 ? 'warn' : 'bad', note: 'earned schedule ÷ actual time' })}
               ${statTile({ id: 'earned', label: '% Earned', value: valueOrNA(fmtPct(evm.earnedPct), 'no costs in file'), note: `of ${fmtMoney(evm.bac)} BAC` })}
+            </div>
+            <div class="statrow">
               ${statTile({ id: 'dcma', label: 'DCMA', value: `<span class="num">${dcmaPass}/${14 - dcmaNA}</span>`, note: dcmaNA ? `${dcmaNA} not computable` : 'all computable', tone: dcmaPass >= 10 ? 'good' : 'warn' })}
+              ${statTile({ id: 'lpath', label: 'Longest path', value: `<span class="num">${store.d.lpath.cyclic ? '—' : store.d.lpath.path.length}</span>`, note: 'activities driving finish' })}
             </div>
           </div>
         </div>
@@ -2396,6 +2506,14 @@ const ViewCommand = {
       earned: () => openModal('% Earned', 'cost-weighted, at the data date', `
         <kbd class="formula">Σ(activity cost × earned %) ÷ Σ(activity cost), earned % from phys_complete_pct (÷100) or schedule-elapsed, 0 for unstarted work</kbd>
         <dl><dt>EV</dt><dd class="num">${fmtMoney(evm.ev)}</dd><dt>BAC</dt><dd class="num">${fmtMoney(evm.bac)}</dd></dl>`),
+      spit: () => openModal('Earned Schedule — SPI(t)', 'Lipke time-based schedule performance', evm.es.value === null
+        ? `<p>${esc(evm.es.reason)}</p>`
+        : `<kbd class="formula">ES = ${evm.es.es.toFixed(2)} ${evm.es.unit} of plan earned · AT = ${evm.es.at.toFixed(2)} ${evm.es.unit} elapsed · SPI(t) = ES ÷ AT = ${evm.es.value.toFixed(2)}</kbd>
+           <p>The project has earned the plan's first <b class="num">${evm.es.es.toFixed(1)}</b> ${evm.es.unit} of value in <b class="num">${evm.es.at.toFixed(1)}</b> ${evm.es.unit} of actual time — <b class="num">${Math.abs(evm.es.svt).toFixed(1)}</b> ${evm.es.unit} ${evm.es.svt < 0 ? 'behind' : 'ahead of'} plan in time units. Unlike cost-based SPI, SPI(t) does not drift back to 1.0 as a late project approaches completion.</p>`),
+      lpath: () => openModal('Longest path', 'driving chain from the CPM engine', store.d.lpath.cyclic
+        ? '<p>Network is cyclic — no longest path derivable.</p>'
+        : `<ul class="offender-list">${store.d.lpath.path.map((id) => `<li>${esc(store.model.taskById.get(id)?.code || id)}</li>`).join('')}</ul>
+           <p style="color:var(--dim);font-size:12.5px;margin-top:10px">Full detail on the Schedule Health view.</p>`),
       crit: () => openModal('Critical activities', 'total float ≤ 0, not complete', critical.length
         ? `<ul class="offender-list">${critical.map((t) => `<li>${esc(t.code)}</li>`).join('')}</ul>`
         : '<p>No activities with float ≤ 0.</p>'),
@@ -2541,6 +2659,23 @@ const ViewHealth = {
       </div>
 
       <div class="section">
+        <h2>Longest path</h2>
+        <p class="sub">The driving chain to project finish from the CPM engine (logic-only working-day model — P6's longest-path definition, distinct from a float filter). ${store.d.lpath.cyclic ? 'Not derivable: the network is cyclic.' : `${store.d.lpath.path.length} activities drive the finish.`}</p>
+        ${store.d.lpath.cyclic ? '' : `<div class="tablewrap"><table class="ledger"><tbody>
+          ${store.d.lpath.path.map((id, i) => {
+            const t = store.model.taskById.get(id);
+            if (!t) return '';
+            return `<tr class="rowlink" data-lp="${esc(id)}" tabindex="0">
+              <td class="num" style="width:36px;color:var(--dim-2)">${i + 1}</td>
+              <td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td>
+              <td class="num">${t.origDays !== undefined ? t.origDays + ' wd' : '—'}</td>
+              <td>${t.status === 'TK_Complete' ? '<span class="pill pass">done</span>' : t.status === 'TK_Active' ? '<span class="pill info">active</span>' : ''}</td>
+            </tr>`;
+          }).join('')}
+        </tbody></table></div>`}
+      </div>
+
+      <div class="section">
         <h2>Float bands</h2>
         <p class="sub">The near-critical radar across incomplete work${store.d.bands.unmeasured ? ` (${store.d.bands.unmeasured} with no float in file — not binned, not assumed)` : ''}.</p>
         <div class="tablewrap"><table class="ledger"><tbody>
@@ -2574,6 +2709,15 @@ const ViewHealth = {
         openModal(f.name, `${f.tasks.length} finding${f.tasks.length === 1 ? '' : 's'}`, `
           <p>${esc(f.why)}</p>
           ${f.tasks.length ? offenderListHTML(f.tasks.map((t) => t.id), store.model, 40) : '<p class="sub">Clean.</p>'}`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+
+    el.querySelectorAll('[data-lp]').forEach((tr) => {
+      const open = () => {
+        const t = store.model.taskById.get(tr.dataset.lp);
+        openModal(`${t.code} — ${t.name}`, 'on the longest path', taskModalBody(t, store.model));
       };
       tr.addEventListener('click', open);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
@@ -2861,6 +3005,22 @@ function buildReportText(store, rep) {
   for (const t of rep.milestonesMissed) line(`  ✗ ${t.code.padEnd(10)} ${t.name}  planned ${fmtDate(t.targetEnd)}`);
   line();
   line(`Planned value in window: ${fmtMoney(rep.valuePlanned)} · Completed value: ${fmtMoney(rep.valueDone)}`);
+  line();
+  // schedule narrative essentials: performance indices, critical path, float
+  const evm = store.d.evm;
+  line('PERFORMANCE');
+  line(`  SPI ${evm.spi.value !== null ? evm.spi.value.toFixed(2) : 'N/A'} · SPI(t) ${evm.es.value !== null ? evm.es.value.toFixed(2) : 'N/A'}${evm.es.value !== null ? ` (${Math.abs(evm.es.svt).toFixed(1)} ${evm.es.unit} ${evm.es.svt < 0 ? 'behind' : 'ahead'})` : ''} · CPI ${evm.cpi.value !== null ? evm.cpi.value.toFixed(2) : 'N/A'}`);
+  line();
+  const lp = store.d.lpath;
+  if (!lp.cyclic && lp.path.length) {
+    line(`CRITICAL PATH (LONGEST PATH — ${lp.path.length} activities)`);
+    line('  ' + lp.path.map((id) => m.taskById.get(id)?.code || id).join(' → '));
+    line();
+  }
+  const bands = store.d.bands.bands;
+  line('FLOAT');
+  line('  ' + bands.map((b) => `${b.label}: ${b.tasks.length}`).join(' · '));
+  line();
   line(`Generated by PRISM Deep Field — values derived only from the XER's own fields.`);
   return L.join('\n');
 }
@@ -3100,6 +3260,147 @@ const ViewLookahead = {
 };
 
 
+// ---- src/views/register.js ----
+// Activity Register — the full "listing of all work activities as of the
+// data date" that DOT-style schedule narratives mandate: ID, description,
+// original/remaining duration, total float, dates, calendar — groupable by
+// WBS or by any activity code type in the file (Area / Phase / …), sortable,
+// filterable, exportable.
+
+
+
+const REG_COLS = [
+  ['code', 'Activity ID', (t) => t.code, false],
+  ['name', 'Description', (t) => t.name, false],
+  ['od', 'OD (wd)', (t) => t.origDays, true],
+  ['rd', 'RD (wd)', (t) => t.remainHrs !== undefined ? t.remainHrs / (t.cal.dayHrs || 8) : undefined, true],
+  ['tf', 'TF (wd)', (t) => t.floatDays, true],
+  ['start', 'Start', (t) => t.actStart ?? t.targetStart, true],
+  ['finish', 'Finish', (t) => t.actEnd ?? t.targetEnd, true],
+  ['status', 'Status', (t) => t.status, false],
+];
+
+function regCell(key, v) {
+  if (v === undefined) return `<td class="num">${naTag('not in file')}</td>`;
+  if (key === 'start' || key === 'finish') return `<td class="num">${fmtDate(v)}</td>`;
+  if (key === 'od' || key === 'rd' || key === 'tf') return `<td class="num">${(+v).toFixed(key === 'tf' ? 1 : 0)}</td>`;
+  if (key === 'status') return `<td>${{ TK_Complete: 'complete', TK_Active: 'in progress', TK_NotStart: 'not started' }[v] || esc(v)}</td>`;
+  return `<td class="${key === 'code' ? 'num' : ''}">${esc(String(v))}</td>`;
+}
+
+function regGroups(store) {
+  const m = store.model;
+  const g = store.regState.groupBy;
+  const q = (store.regState.q || '').toLowerCase();
+  const tasks = m.tasks.filter((t) => !q || t.code.toLowerCase().includes(q) || t.name.toLowerCase().includes(q));
+  const [key, dir] = store.regState.sort;
+  const col = REG_COLS.find((c) => c[0] === key);
+  const sorted = [...tasks].sort((a, b) => {
+    const va = col[2](a), vb = col[2](b);
+    if (va === undefined) return 1;
+    if (vb === undefined) return -1;
+    const cmp = typeof va === 'number' ? va - vb : String(va).localeCompare(String(vb));
+    return dir === 'asc' ? cmp : -cmp;
+  });
+  if (g === 'none') return [{ label: null, tasks: sorted }];
+  if (g === 'wbs') {
+    const map = new Map();
+    for (const t of sorted) {
+      const node = m.wbsById.get(t.wbsId);
+      const label = node ? node.name : '(unplaced)';
+      if (!map.has(label)) map.set(label, []);
+      map.get(label).push(t);
+    }
+    return [...map.entries()].map(([label, ts]) => ({ label, tasks: ts }));
+  }
+  // group by an activity code type
+  const type = m.codeTypes.get(g);
+  const map = new Map();
+  const un = [];
+  for (const t of sorted) {
+    const hit = t.codes.find((c) => c.type.id === g);
+    if (!hit) { un.push(t); continue; }
+    const label = `${hit.value.shortName} — ${hit.value.name}`;
+    if (!map.has(label)) map.set(label, []);
+    map.get(label).push(t);
+  }
+  const out = [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([label, ts]) => ({ label, tasks: ts }));
+  if (un.length) out.push({ label: `(no ${type ? type.name : 'code'} assigned)`, tasks: un });
+  return out;
+}
+
+const ViewRegister = {
+  id: 'register', title: 'Activity Register', group: 'Reporting',
+  chip(store) {
+    return `<span class="num">${store.model.tasks.length}</span> activities`;
+  },
+  render(el, store) {
+    const m = store.model;
+    if (!store.regState) store.regState = { groupBy: 'wbs', q: '', sort: ['start', 'asc'] };
+    const st = store.regState;
+    const groups = regGroups(store);
+    const shown = groups.reduce((a, g) => a + g.tasks.length, 0);
+    const [sortKey, sortDir] = st.sort;
+
+    el.innerHTML = `
+      <div class="section">
+        <h2>Activity register</h2>
+        <p class="sub">The full listing as of the data date (${fmtDate(m.dataDate)}) — the table a schedule narrative appends. Group by WBS or by any activity code in the file; click a column to sort, a row for detail.</p>
+        <div class="filterrow">
+          <input type="search" data-reg-q placeholder="filter code / name…" value="${esc(st.q)}" aria-label="Filter activities">
+          <select data-reg-group aria-label="Group by">
+            <option value="wbs" ${st.groupBy === 'wbs' ? 'selected' : ''}>Group: WBS</option>
+            ${[...m.codeTypes.values()].map((ct) => `<option value="${esc(ct.id)}" ${st.groupBy === ct.id ? 'selected' : ''}>Group: ${esc(ct.name)}</option>`).join('')}
+            <option value="none" ${st.groupBy === 'none' ? 'selected' : ''}>No grouping</option>
+          </select>
+          <span class="spacer"></span>
+          <span class="chip"><span class="num">${shown}</span> of ${m.tasks.length}</span>
+          <button class="btn small" data-csv>Export CSV</button>
+        </div>
+        <div class="tablewrap"><table class="ledger">
+          <thead><tr>${REG_COLS.map(([key, label, , num]) => `
+            <th class="${num ? 'num' : ''}" style="cursor:pointer" data-sort="${key}">${esc(label)}${sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</th>`).join('')}
+          </tr></thead>
+          <tbody>
+            ${groups.map((g) => `
+              ${g.label !== null ? `<tr><td colspan="${REG_COLS.length}" style="font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim-2);padding-top:14px">// ${esc(g.label)} · ${g.tasks.length}</td></tr>` : ''}
+              ${g.tasks.map((t) => `<tr class="rowlink" data-task="${esc(t.id)}" tabindex="0">
+                ${REG_COLS.map(([key, , get]) => regCell(key, get(t))).join('')}
+              </tr>`).join('')}`).join('')}
+          </tbody>
+        </table></div>
+      </div>`;
+
+    const rerender = () => ViewRegister.render(el, store);
+    el.querySelector('[data-reg-q]').addEventListener('input', (e) => { st.q = e.target.value; rerender(); });
+    el.querySelector('[data-reg-group]').addEventListener('change', (e) => { st.groupBy = e.target.value; rerender(); });
+    el.querySelectorAll('[data-sort]').forEach((th) => th.addEventListener('click', () => {
+      st.sort = st.sort[0] === th.dataset.sort ? [th.dataset.sort, st.sort[1] === 'asc' ? 'desc' : 'asc'] : [th.dataset.sort, 'asc'];
+      rerender();
+    }));
+    el.querySelectorAll('[data-task]').forEach((tr) => {
+      const open = () => {
+        const t = m.taskById.get(tr.dataset.task);
+        const codes = t.codes.map((c) => `${esc(c.type.name)}: ${esc(c.value.name)}`).join(' · ');
+        openModal(`${t.code} — ${t.name}`, codes || 'no activity codes assigned', taskModalBody(t, m));
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+    el.querySelector('[data-csv]').addEventListener('click', () => downloadCSV(
+      `activity_register_${isoDate(m.dataDate)}.csv`,
+      ['activity_id', 'description', 'od_wd', 'rd_wd', 'tf_wd', 'start', 'finish', 'status', 'calendar', 'wbs',
+        ...[...m.codeTypes.values()].map((ct) => ct.name.toLowerCase())],
+      m.tasks.map((t) => [t.code, t.name,
+        t.origDays ?? '', t.remainHrs !== undefined ? (t.remainHrs / (t.cal.dayHrs || 8)).toFixed(1) : '',
+        t.floatDays !== undefined ? t.floatDays.toFixed(1) : '',
+        isoDate(t.actStart ?? t.targetStart), isoDate(t.actEnd ?? t.targetEnd), t.status, t.cal.name,
+        m.wbsById.get(t.wbsId)?.name || '',
+        ...[...m.codeTypes.values()].map((ct) => t.codes.find((c) => c.type.id === ct.id)?.value.name || '')])));
+  },
+};
+
+
 // ---- src/views/gantt.js ----
 // Gantt — WBS-reach task cards; expanding a card opens the detail modal with
 // a canvas mini-Gantt. Critical work is drawn as a dashed outline (same hue,
@@ -3335,6 +3636,7 @@ const ViewSCurve = {
         <p class="sub">Monthly planned value with the cumulative plan line. EV and AC are single marks at the data date — the file carries one snapshot of actuals, not a history, so no actual curve is drawn.</p>
         <div class="ringrow">
           ${ring('SPI', evm.spi.value, (v) => v.toFixed(2), evm.spi.value >= 0.95 ? 'var(--good)' : evm.spi.value >= 0.85 ? 'var(--warn)' : 'var(--bad)', evm.spi.value === null ? esc(evm.spi.reason) : '')}
+          ${ring('SPI(t)', evm.es.value, (v) => v.toFixed(2), evm.es.value >= 0.95 ? 'var(--good)' : evm.es.value >= 0.85 ? 'var(--warn)' : 'var(--bad)', evm.es.value === null ? esc(evm.es.reason) : `${Math.abs(evm.es.svt).toFixed(1)} ${evm.es.unit} ${evm.es.svt < 0 ? 'behind' : 'ahead'}`)}
           ${ring('CPI', evm.cpi.value, (v) => v.toFixed(2), evm.cpi.value >= 0.95 ? 'var(--good)' : evm.cpi.value >= 0.85 ? 'var(--warn)' : 'var(--bad)', evm.cpi.value === null ? esc(evm.cpi.reason) : '')}
           ${ring('% earned', evm.earnedPct, (v) => fmtPct(v), 'var(--trace)')}
         </div>
@@ -3441,6 +3743,27 @@ const ViewSCurve = {
         };
         pt(evm.ev, css('--good'), 'EV', 3);
         pt(evm.ac, css('--bad'), 'AC', evm.ac > evm.ev - maxCum * 0.05 && evm.ac < evm.ev + maxCum * 0.05 ? 14 : 3);
+
+        // Earned-schedule projection: trace today's EV horizontally back to
+        // the plan curve — where it lands is ES, "the date we were supposed
+        // to be here". The gap to the data date IS the slip, in time.
+        if (evm.es.value !== null && evm.ev > 0 && evm.ev < evm.bac) {
+          let n = 0;
+          while (n < pv.length && pv[n].cum <= evm.ev) n++;
+          if (n < pv.length) {
+            const prevCum = n === 0 ? 0 : pv[n - 1].cum;
+            const frac = (evm.ev - prevCum) / (pv[n].cum - prevCum || 1);
+            const x0 = n === 0 ? pad.l : X(n - 1);
+            const esX = x0 + frac * (X(n) - x0);
+            const yEv = Y(evm.ev);
+            ctx.strokeStyle = css('--good'); ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(ddX - 6, yEv); ctx.lineTo(esX, yEv); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(esX, yEv); ctx.lineTo(esX, h - pad.b); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = css('--good');
+            ctx.fillText('ES', esX - 6, h - pad.b - 5);
+          }
+        }
       }
       geom = { pad, w, h, X, count: pv.length };
     });
@@ -3652,14 +3975,16 @@ const ViewCompare = {
           ${statTile({ id: 'slipped', label: 'Slipped', value: `<span class="num">${slipped.filter((x) => x.slipDays > 0).length}</span>`, tone: 'warn', note: 'later than baseline' })}
         </div>
         <div class="tablewrap"><table class="ledger">
-          <thead><tr><th>Activity</th><th class="num">Baseline finish</th><th class="num">Current finish</th><th class="num">Slip</th></tr></thead>
+          <thead><tr><th>Activity</th><th class="num">Baseline finish</th><th class="num">Current finish</th><th class="num">Slip</th><th class="num" title="Total float change vs baseline — negative is float consumed">Δ TF</th></tr></thead>
           <tbody>${cmp.matched.slice(0, 60).map((x) => `<tr class="rowlink" data-code="${esc(x.code)}" tabindex="0">
             <td><span class="num">${esc(x.code)}</span> ${esc(x.cur.name.slice(0, 44))}</td>
             <td class="num">${fmtDate(x.baseFinish)}</td>
             <td class="num">${fmtDate(x.curFinish)}</td>
             <td class="num">${cmpSlip(x.slipDays)}</td>
+            <td class="num">${x.floatDelta === undefined ? '—' : x.floatDelta < 0 ? `<span style="color:var(--bad)">${x.floatDelta} wd</span>` : `<span style="color:var(--dim)">${x.floatDelta > 0 ? '+' : ''}${x.floatDelta} wd</span>`}</td>
           </tr>`).join('')}</tbody>
-        </table></div>`;
+        </table></div>
+        <p class="sub" style="margin-top:10px">Δ TF is float erosion vs baseline — float being consumed is the earliest signal of schedule stress, often before any finish date moves.</p>`;
     } else if (tab === 'wbs') {
       body = `
         <div class="tablewrap"><table class="ledger">
@@ -3761,8 +4086,10 @@ const ViewCompare = {
 
 
 
+
+
 const VIEWS = [ViewCommand, ViewWBS, ViewHealth,
-  ViewTimeline, ViewReport, ViewLookahead,
+  ViewTimeline, ViewReport, ViewLookahead, ViewRegister,
   ViewGantt, ViewChainage, ViewSCurve, ViewResource, ViewCompare];
 
 const store = {
@@ -3789,6 +4116,7 @@ const store = {
       report: windowReport(m, this.win.from, this.win.to),
       integrity: updateIntegrity(m),
       bands: floatBands(m),
+      lpath: longestPath(m),
     };
   },
 

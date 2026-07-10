@@ -303,8 +303,12 @@ export const ViewCommand = {
               ${statTile({ id: 'cpi', label: 'CPI', value: valueOrNA(fmtRatio(evm.cpi.value), evm.cpi.reason), tone: cpiTone, note: 'EV ÷ AC' })}
             </div>
             <div class="statrow">
+              ${statTile({ id: 'spit', label: 'SPI(t)', value: valueOrNA(fmtRatio(evm.es.value), evm.es.reason), tone: evm.es.value === null ? '' : evm.es.value >= 0.95 ? 'good' : evm.es.value >= 0.85 ? 'warn' : 'bad', note: 'earned schedule ÷ actual time' })}
               ${statTile({ id: 'earned', label: '% Earned', value: valueOrNA(fmtPct(evm.earnedPct), 'no costs in file'), note: `of ${fmtMoney(evm.bac)} BAC` })}
+            </div>
+            <div class="statrow">
               ${statTile({ id: 'dcma', label: 'DCMA', value: `<span class="num">${dcmaPass}/${14 - dcmaNA}</span>`, note: dcmaNA ? `${dcmaNA} not computable` : 'all computable', tone: dcmaPass >= 10 ? 'good' : 'warn' })}
+              ${statTile({ id: 'lpath', label: 'Longest path', value: `<span class="num">${store.d.lpath.cyclic ? '—' : store.d.lpath.path.length}</span>`, note: 'activities driving finish' })}
             </div>
           </div>
         </div>
@@ -380,6 +384,14 @@ export const ViewCommand = {
       earned: () => openModal('% Earned', 'cost-weighted, at the data date', `
         <kbd class="formula">Σ(activity cost × earned %) ÷ Σ(activity cost), earned % from phys_complete_pct (÷100) or schedule-elapsed, 0 for unstarted work</kbd>
         <dl><dt>EV</dt><dd class="num">${fmtMoney(evm.ev)}</dd><dt>BAC</dt><dd class="num">${fmtMoney(evm.bac)}</dd></dl>`),
+      spit: () => openModal('Earned Schedule — SPI(t)', 'Lipke time-based schedule performance', evm.es.value === null
+        ? `<p>${esc(evm.es.reason)}</p>`
+        : `<kbd class="formula">ES = ${evm.es.es.toFixed(2)} ${evm.es.unit} of plan earned · AT = ${evm.es.at.toFixed(2)} ${evm.es.unit} elapsed · SPI(t) = ES ÷ AT = ${evm.es.value.toFixed(2)}</kbd>
+           <p>The project has earned the plan's first <b class="num">${evm.es.es.toFixed(1)}</b> ${evm.es.unit} of value in <b class="num">${evm.es.at.toFixed(1)}</b> ${evm.es.unit} of actual time — <b class="num">${Math.abs(evm.es.svt).toFixed(1)}</b> ${evm.es.unit} ${evm.es.svt < 0 ? 'behind' : 'ahead of'} plan in time units. Unlike cost-based SPI, SPI(t) does not drift back to 1.0 as a late project approaches completion.</p>`),
+      lpath: () => openModal('Longest path', 'driving chain from the CPM engine', store.d.lpath.cyclic
+        ? '<p>Network is cyclic — no longest path derivable.</p>'
+        : `<ul class="offender-list">${store.d.lpath.path.map((id) => `<li>${esc(store.model.taskById.get(id)?.code || id)}</li>`).join('')}</ul>
+           <p style="color:var(--dim);font-size:12.5px;margin-top:10px">Full detail on the Schedule Health view.</p>`),
       crit: () => openModal('Critical activities', 'total float ≤ 0, not complete', critical.length
         ? `<ul class="offender-list">${critical.map((t) => `<li>${esc(t.code)}</li>`).join('')}</ul>`
         : '<p>No activities with float ≤ 0.</p>'),

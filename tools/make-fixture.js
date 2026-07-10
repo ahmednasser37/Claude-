@@ -224,6 +224,21 @@ function emitXER({ acts, isBaseline }) {
   row('%F', 'wbs_id', 'parent_wbs_id', 'wbs_short_name', 'wbs_name', 'proj_node_flag');
   for (const w of WBS) row('%R', ...w);
 
+  // activity codes: the grouping axis planners report by
+  row('%T', 'ACTVTYPE');
+  row('%F', 'actv_code_type_id', 'actv_code_type', 'actv_code_type_scope');
+  row('%R', '401', 'AREA', 'AS_Project');
+  row('%R', '402', 'PHASE', 'AS_Project');
+  row('%T', 'ACTVCODE');
+  row('%F', 'actv_code_id', 'actv_code_type_id', 'short_name', 'actv_code_name', 'parent_actv_code_id');
+  row('%R', '501', '401', 'N', 'North Spread', '');
+  row('%R', '502', '401', 'S', 'South Spread', '');
+  row('%R', '503', '401', 'X', 'Crossings', '');
+  row('%R', '504', '401', 'SW', 'Site-wide', '');
+  row('%R', '511', '402', 'EP', 'Engineering & Procurement', '');
+  row('%R', '512', '402', 'CON', 'Construction', '');
+  row('%R', '513', '402', 'TST', 'Testing & Handover', '');
+
   row('%T', 'RSRC');
   row('%F', 'rsrc_id', 'rsrc_short_name', 'rsrc_name', 'rsrc_type');
   for (const [id, sn, name, type] of RSRC) row('%R', id, sn, name, type);
@@ -277,6 +292,15 @@ function emitXER({ acts, isBaseline }) {
         actCost ? String(actCost - ot) : '', ot ? String(ot) : '',
         actQty ? String(actQty) : '', '', String(Math.max(qty - actQty, 0)));
     }
+  }
+
+  row('%T', 'TASKACTV');
+  row('%F', 'task_id', 'actv_code_type_id', 'actv_code_id', 'proj_id');
+  const area = (code) => /^S3[12]/.test(code) ? '501' : /^S3[34]/.test(code) ? '502' : /^C-/.test(code) ? '503' : '504';
+  const phase = (code) => /^P-/.test(code) ? '511' : /^(T-|M-1)/.test(code) ? '513' : '512';
+  for (const a of acts) {
+    row('%R', a.id, '401', area(a.code), '1001');
+    row('%R', a.id, '402', phase(a.code), '1001');
   }
 
   row('%T', 'TASK'); // second block of the SAME logical table

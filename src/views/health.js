@@ -2,7 +2,7 @@
 // modal with formula, threshold, measured value and offenders (or the honest
 // reason it isn't computable).
 import { openModal } from '../ui/modal.js';
-import { esc, statusPill, fmtPct, offenderListHTML } from '../ui/components.js';
+import { esc, statusPill, fmtPct, offenderListHTML, taskModalBody } from '../ui/components.js';
 
 function dcmaValueText(c) {
   if (c.value === null || c.value === undefined) return '—';
@@ -53,6 +53,23 @@ export const ViewHealth = {
       </div>
 
       <div class="section">
+        <h2>Longest path</h2>
+        <p class="sub">The driving chain to project finish from the CPM engine (logic-only working-day model — P6's longest-path definition, distinct from a float filter). ${store.d.lpath.cyclic ? 'Not derivable: the network is cyclic.' : `${store.d.lpath.path.length} activities drive the finish.`}</p>
+        ${store.d.lpath.cyclic ? '' : `<div class="tablewrap"><table class="ledger"><tbody>
+          ${store.d.lpath.path.map((id, i) => {
+            const t = store.model.taskById.get(id);
+            if (!t) return '';
+            return `<tr class="rowlink" data-lp="${esc(id)}" tabindex="0">
+              <td class="num" style="width:36px;color:var(--dim-2)">${i + 1}</td>
+              <td class="num">${esc(t.code)}</td><td>${esc(t.name)}</td>
+              <td class="num">${t.origDays !== undefined ? t.origDays + ' wd' : '—'}</td>
+              <td>${t.status === 'TK_Complete' ? '<span class="pill pass">done</span>' : t.status === 'TK_Active' ? '<span class="pill info">active</span>' : ''}</td>
+            </tr>`;
+          }).join('')}
+        </tbody></table></div>`}
+      </div>
+
+      <div class="section">
         <h2>Float bands</h2>
         <p class="sub">The near-critical radar across incomplete work${store.d.bands.unmeasured ? ` (${store.d.bands.unmeasured} with no float in file — not binned, not assumed)` : ''}.</p>
         <div class="tablewrap"><table class="ledger"><tbody>
@@ -86,6 +103,15 @@ export const ViewHealth = {
         openModal(f.name, `${f.tasks.length} finding${f.tasks.length === 1 ? '' : 's'}`, `
           <p>${esc(f.why)}</p>
           ${f.tasks.length ? offenderListHTML(f.tasks.map((t) => t.id), store.model, 40) : '<p class="sub">Clean.</p>'}`);
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+
+    el.querySelectorAll('[data-lp]').forEach((tr) => {
+      const open = () => {
+        const t = store.model.taskById.get(tr.dataset.lp);
+        openModal(`${t.code} — ${t.name}`, 'on the longest path', taskModalBody(t, store.model));
       };
       tr.addEventListener('click', open);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });

@@ -83,6 +83,39 @@ export function runCPM(model, { durationOverride = null } = {}) {
   return { cyclic: false, nodes, order, finishDays };
 }
 
+// Longest path — the driving chain to project finish, walked backward from
+// the latest-finishing node through whichever predecessor actually sets each
+// node's early start (P6's own definition of "critical" on the longest path,
+// distinct from a total-float filter).
+export function longestPath(model) {
+  const r = runCPM(model);
+  if (r.cyclic) return { cyclic: true, path: [] };
+  let cur = null;
+  for (const n of r.order) if (!cur || n.ef > cur.ef) cur = n;
+  const path = [];
+  const seen = new Set();
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    path.push(cur.id);
+    let driver = null;
+    for (const e of cur.preds) {
+      const { from, type, lag } = e;
+      let minEs;
+      switch (type) {
+        case 'PR_SS': minEs = from.es + lag; break;
+        case 'PR_FF': minEs = from.ef + lag - cur.d; break;
+        case 'PR_SF': minEs = from.es + lag - cur.d; break;
+        default:      minEs = from.ef + lag;
+      }
+      // the predecessor that binds this node's early start drives it
+      if (Math.abs(minEs - cur.es) < 1e-9 && (!driver || from.ef > driver.ef)) driver = from;
+    }
+    cur = driver;
+  }
+  path.reverse();
+  return { cyclic: false, path, finishDays: r.finishDays };
+}
+
 // DCMA check 12 — Critical Path Test: extend a driving activity's duration
 // and confirm the project finish shifts by the same amount.
 export function criticalPathTest(model, extendBy = 100) {
